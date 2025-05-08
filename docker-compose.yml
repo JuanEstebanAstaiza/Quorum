@@ -1,0 +1,18 @@
+    # docker-compose.yml
+    services:
+      database_volume_manager:
+        build:
+          context: .
+          dockerfile: Dockerfile # Especifica el Dockerfile para este servicio
+        container_name: condominio_db_storage_container
+        volumes:
+          # Monta el directorio './condominio_db_data' del host 
+          # (donde la app Python crea/usa condominio.db)
+          # a '/database_storage_mountpoint' dentro de este contenedor.
+          # Esto asegura que el archivo condominio.db sea persistente y gestionado por Docker.
+          - ./condominio_db_data:/database_storage_mountpoint
+        # El contenedor se mantiene corriendo para que el volumen persista y sea gestionado por este servicio.
+        # No necesita exponer puertos ya que la app Python en el host accede directamente 
+        # al archivo en el directorio del host (./condominio_db_data).
+        restart: unless-stopped # Opcional: para que el contenedor se reinicie si se detiene inesperadamente
+    
