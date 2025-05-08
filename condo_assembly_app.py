@@ -5,15 +5,18 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from collections import Counter
 import os
+import datetime  # Para nombres de archivo únicos si es necesario
 
-# --- Configuración de la Base de Datos ---
+# --- Configuración de la Base de Datos y Carpetas ---
 HOST_DATA_DIR = "condominio_db_data"
 DB_NAME = os.path.join(HOST_DATA_DIR, 'condominio.db')
+GRAFICOS_DIR = os.path.join(HOST_DATA_DIR, 'graficos_votaciones')  # Carpeta para guardar gráficos
 
 
-# --- Funciones de Base de Datos ---
-def init_db():
-    """Inicializa la base de datos y crea las tablas si no existen."""
+# --- Funciones de Base de Datos e Inicialización ---
+def init_app_dirs_and_db():
+    """Inicializa los directorios de la aplicación y la base de datos."""
+    # Crear directorio principal de datos si no existe
     if not os.path.exists(HOST_DATA_DIR):
         try:
             os.makedirs(HOST_DATA_DIR)
@@ -21,6 +24,17 @@ def init_db():
         except OSError as e:
             print(f"Error al crear el directorio de datos del host {HOST_DATA_DIR}: {e}")
             raise
+
+    # Crear directorio para gráficos si no existe
+    if not os.path.exists(GRAFICOS_DIR):
+        try:
+            os.makedirs(GRAFICOS_DIR)
+            print(f"Directorio de gráficos creado en: {GRAFICOS_DIR}")
+        except OSError as e:
+            print(f"Error al crear el directorio de gráficos {GRAFICOS_DIR}: {e}")
+            # No es crítico para la DB, pero sí para guardar gráficos
+            messagebox.showwarning("Advertencia de Directorio",
+                                   f"No se pudo crear el directorio para guardar gráficos: {GRAFICOS_DIR}\nLos gráficos no se guardarán como archivos.")
 
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -65,7 +79,7 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         asamblea_id INTEGER NOT NULL,
         texto_pregunta TEXT NOT NULL,
-        opciones_configuradas TEXT, -- Comma-separated e.g., "Sí,No,Abstenerse"
+        opciones_configuradas TEXT, 
         activa INTEGER DEFAULT 0,
         FOREIGN KEY (asamblea_id) REFERENCES asambleas(id)
     )
@@ -77,7 +91,7 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         pregunta_id INTEGER NOT NULL,
         cedula_votante TEXT NOT NULL,
-        opcion_elegida TEXT NOT NULL, -- Texto de la opción elegida
+        opcion_elegida TEXT NOT NULL, 
         FOREIGN KEY (pregunta_id) REFERENCES preguntas(id),
         FOREIGN KEY (cedula_votante) REFERENCES residentes(cedula),
         UNIQUE (pregunta_id, cedula_votante)
@@ -92,14 +106,14 @@ class App:
     def __init__(self, root):
         self.root = root
         self.root.title("Gestión de Asambleas de Condominio")
-        self.root.geometry("1100x750")  # Aumentar un poco el tamaño por los nuevos campos
+        self.root.geometry("1100x750")
 
         style = ttk.Style()
         style.theme_use('clam')
 
         self.current_assembly_id = None
         self.current_question_id = None
-        self.current_question_options = []  # Opciones para la pregunta activa
+        self.current_question_options = []
 
         self.notebook = ttk.Notebook(root)
 
@@ -117,7 +131,7 @@ class App:
 
         self.notebook.pack(expand=True, fill='both', padx=10, pady=10)
 
-        init_db()
+        init_app_dirs_and_db()  # Cambiado a la nueva función de inicialización
         self.load_residents()
         self.load_assemblies()
 
@@ -134,17 +148,18 @@ class App:
             if fetchall:
                 result = cursor.fetchall()
         except sqlite3.Error as e:
-            messagebox.showerror("Error de Base de Datos", f"Error: {e}\nQuery: {query}\nParams: {params}")
-            # Podrías querer registrar el error en un log también
-            if conn:  # Asegurar que la conexión no se cierre si ya está cerrada
-                conn.rollback()  # Revertir cambios si la transacción falló
-            return None  # O re-lanzar la excepción dependiendo de cómo quieras manejarlo
+            messagebox.showerror("Error de Base de Datos",
+                                 f"Detalle del error: {e}\nConsulta: {query}\nParámetros: {params}")
+            print(f"Error de Base de Datos: {e}\nConsulta: {query}\nParámetros: {params}")
+            if conn:
+                conn.rollback()
+            return None
         finally:
             if conn:
                 conn.close()
         return result
 
-    # --- Pestaña de Residentes ---
+    # --- Pestaña de Residentes (sin cambios respecto a la v3 anterior) ---
     def setup_resident_tab(self):
         frame = self.resident_tab
 
@@ -167,7 +182,7 @@ class App:
         self.resident_house_entry = ttk.Entry(form_frame, width=40)
         self.resident_house_entry.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
 
-        self.resident_cedula_to_update = None  # Usaremos esto para saber si estamos actualizando
+        self.resident_cedula_to_update = None
 
         button_frame = ttk.Frame(form_frame)
         button_frame.grid(row=4, column=0, columnspan=2, pady=10)
@@ -178,7 +193,7 @@ class App:
         list_frame = ttk.LabelFrame(frame, text="Lista de Residentes Activos", padding=10)
         list_frame.pack(padx=10, pady=10, fill="both", expand=True)
 
-        columns = ("cedula", "nombre", "celular", "casa")  # 'activo' ya no se muestra directamente
+        columns = ("cedula", "nombre", "celular", "casa")
         self.resident_tree = ttk.Treeview(list_frame, columns=columns, show="headings")
         for col in columns:
             self.resident_tree.heading(col, text=col.capitalize())
@@ -200,7 +215,7 @@ class App:
                                                                                                      padx=5)
 
     def clear_resident_fields(self):
-        self.resident_cedula_entry.config(state='normal')  # Habilitar si estaba deshabilitado para update
+        self.resident_cedula_entry.config(state='normal')
         self.resident_cedula_entry.delete(0, tk.END)
         self.resident_name_entry.delete(0, tk.END)
         self.resident_phone_entry.delete(0, tk.END)
@@ -219,11 +234,11 @@ class App:
             return
 
         try:
-            if self.resident_cedula_to_update:  # Actualizando un residente existente
+            if self.resident_cedula_to_update:
                 self.execute_query("UPDATE residentes SET nombre=?, celular=?, casa=? WHERE cedula=?",
                                    (nombre, celular, casa, self.resident_cedula_to_update), commit=True)
                 messagebox.showinfo("Éxito", "Residente actualizado correctamente.")
-            else:  # Creando un nuevo residente
+            else:
                 self.execute_query(
                     "INSERT INTO residentes (cedula, nombre, celular, casa, activo) VALUES (?, ?, ?, ?, 1)",
                     (cedula, nombre, celular, casa), commit=True)
@@ -248,10 +263,10 @@ class App:
 
         values = self.resident_tree.item(selected_item, "values")
         if values:
-            self.resident_cedula_to_update = values[0]  # Cédula está en la primera columna
+            self.resident_cedula_to_update = values[0]
             self.resident_cedula_entry.delete(0, tk.END)
             self.resident_cedula_entry.insert(0, values[0])
-            self.resident_cedula_entry.config(state='disabled')  # No permitir cambiar cédula al actualizar
+            self.resident_cedula_entry.config(state='disabled')
 
             self.resident_name_entry.delete(0, tk.END)
             self.resident_name_entry.insert(0, values[1])
@@ -276,7 +291,7 @@ class App:
             "SELECT cedula, nombre, casa FROM residentes WHERE activo = 1 ORDER BY nombre", fetchall=True)
         resident_list = []
         if residents_data:
-            resident_list = [f"{r[0]}: {r[1]} ({r[2]})" for r in residents_data]  # Cédula: Nombre (Casa)
+            resident_list = [f"{r[0]}: {r[1]} ({r[2]})" for r in residents_data]
 
         if hasattr(self, 'proxy_giver_combobox'):
             self.proxy_giver_combobox['values'] = resident_list
@@ -284,7 +299,6 @@ class App:
         if hasattr(self, 'proxy_receiver_combobox'):
             self.proxy_receiver_combobox['values'] = resident_list
             self.proxy_receiver_combobox.set('')
-        # voting_resident_combobox se actualiza con load_eligible_voters
 
     def deactivate_resident(self):
         selected_item = self.resident_tree.focus()
@@ -305,13 +319,12 @@ class App:
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo actualizar el estado del residente. Error: {e}")
 
-    # --- Pestaña de Asambleas ---
+    # --- Pestaña de Asambleas (sin cambios respecto a la v3 anterior) ---
     def setup_assembly_tab(self):
         frame = self.assembly_tab
 
         assembly_selection_frame = ttk.LabelFrame(frame, text="Gestión de Asamblea", padding=10)
         assembly_selection_frame.pack(padx=10, pady=10, fill="x")
-        # ... (código para fecha y descripción de asamblea sin cambios) ...
         ttk.Label(assembly_selection_frame, text="Fecha (YYYY-MM-DD):").grid(row=0, column=0, padx=5, pady=5,
                                                                              sticky="w")
         self.assembly_date_entry = ttk.Entry(assembly_selection_frame, width=30)
@@ -328,13 +341,12 @@ class App:
 
         assembly_list_frame = ttk.LabelFrame(frame, text="Asambleas Existentes", padding=10)
         assembly_list_frame.pack(padx=10, pady=10, fill="x")
-        self.assembly_combobox = ttk.Combobox(assembly_list_frame, state="readonly", width=65)  # Un poco más ancho
+        self.assembly_combobox = ttk.Combobox(assembly_list_frame, state="readonly", width=65)
         self.assembly_combobox.pack(side=tk.LEFT, padx=5)
         self.assembly_combobox.bind("<<ComboboxSelected>>", self.on_assembly_selected)
 
         powers_frame = ttk.LabelFrame(frame, text="Gestión de Poderes (para la asamblea seleccionada)", padding=10)
         powers_frame.pack(padx=10, pady=10, fill="x")
-        # ... (comboboxes de poderes y treeview sin cambios estructurales, solo usan cédula) ...
         ttk.Label(powers_frame, text="Residente que da poder:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
         self.proxy_giver_combobox = ttk.Combobox(powers_frame, state="readonly", width=40)
         self.proxy_giver_combobox.grid(row=0, column=1, padx=5, pady=5)
@@ -370,7 +382,7 @@ class App:
                                                                                sticky="w")
         self.question_options_entry = ttk.Entry(questions_frame, width=50)
         self.question_options_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        self.question_options_entry.insert(0, "Acepta,No Acepta,En Blanco")  # Opciones por defecto
+        self.question_options_entry.insert(0, "Acepta,No Acepta,En Blanco")
 
         ttk.Button(questions_frame, text="Agregar Pregunta", command=self.add_question_to_assembly).grid(row=1,
                                                                                                          column=2,
@@ -391,7 +403,7 @@ class App:
         questions_frame.grid_columnconfigure(1, weight=1)
         questions_frame.grid_rowconfigure(2, weight=1)
 
-    def create_assembly(self):  # Sin cambios, solo la llamada a load_assemblies
+    def create_assembly(self):
         fecha = self.assembly_date_entry.get()
         descripcion = self.assembly_desc_entry.get()
         if not fecha or not descripcion:
@@ -407,7 +419,7 @@ class App:
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo crear la asamblea: {e}")
 
-    def load_assemblies(self):  # Sin cambios, solo la llamada a on_assembly_selected
+    def load_assemblies(self):
         assemblies = self.execute_query("SELECT id, fecha, descripcion FROM asambleas ORDER BY fecha DESC, id DESC",
                                         fetchall=True)
         if assemblies is not None:
@@ -419,13 +431,13 @@ class App:
                 self.assembly_combobox.set('')
                 self.current_assembly_id = None
                 self.clear_assembly_details()
-        else:  # Falló la consulta
+        else:
             self.assembly_combobox['values'] = []
             self.assembly_combobox.set('')
             self.current_assembly_id = None
             self.clear_assembly_details()
 
-    def on_assembly_selected(self, event=None):  # Sin cambios, solo la llamada a load_selected_assembly_details
+    def on_assembly_selected(self, event=None):
         selection = self.assembly_combobox.get()
         if selection:
             try:
@@ -439,7 +451,7 @@ class App:
             self.current_assembly_id = None
             self.clear_assembly_details()
 
-    def load_selected_assembly_details(self):  # Sin cambios, solo las llamadas a las sub-funciones de carga
+    def load_selected_assembly_details(self):
         if not self.current_assembly_id:
             self.clear_assembly_details()
             return
@@ -448,7 +460,7 @@ class App:
         self.load_questions_for_assembly()
         self.load_questions_for_voting_tab()
 
-    def clear_assembly_details(self):  # Actualizado para limpiar nuevos campos/estados
+    def clear_assembly_details(self):
         if hasattr(self, 'proxy_giver_combobox'): self.proxy_giver_combobox.set('')
         if hasattr(self, 'proxy_receiver_combobox'): self.proxy_receiver_combobox.set('')
         if hasattr(self, 'powers_tree'):
@@ -456,7 +468,7 @@ class App:
         if hasattr(self, 'question_text_entry'): self.question_text_entry.delete(0, tk.END)
         if hasattr(self, 'question_options_entry'):
             self.question_options_entry.delete(0, tk.END)
-            self.question_options_entry.insert(0, "Acepta,No Acepta,En Blanco")  # Reset a default
+            self.question_options_entry.insert(0, "Acepta,No Acepta,En Blanco")
         if hasattr(self, 'questions_tree'):
             for i in self.questions_tree.get_children(): self.questions_tree.delete(i)
 
@@ -466,14 +478,19 @@ class App:
         if hasattr(self, 'voting_resident_combobox'):
             self.voting_resident_combobox.set('')
             self.voting_resident_combobox['values'] = []
-        if hasattr(self, 'vote_option_var_string'): self.vote_option_var_string.set("")  # Ahora es StringVar
+        if hasattr(self, 'vote_option_var_string'): self.vote_option_var_string.set("")
 
         if hasattr(self, 'options_radio_frame') and self.options_radio_frame:
             for widget in self.options_radio_frame.winfo_children(): widget.destroy()
 
         if hasattr(self, 'results_canvas_widget') and self.results_canvas_widget:
-            self.results_canvas_widget.get_tk_widget().destroy()
+            self.results_canvas_widget.destroy()
             self.results_canvas_widget = None
+        if hasattr(self, 'results_display_frame'):
+            for widget in self.results_display_frame.winfo_children():
+                if widget != self.results_canvas_widget:
+                    widget.destroy()
+
         if hasattr(self, 'voting_question_combobox'):
             self.voting_question_combobox['values'] = []
             self.voting_question_combobox.set('')
@@ -548,7 +565,7 @@ class App:
         if not q_text:
             messagebox.showerror("Error", "El texto de la pregunta no puede estar vacío.")
             return
-        if not q_options:  # Usar opciones por defecto si el campo está vacío
+        if not q_options:
             q_options = "Acepta,No Acepta,En Blanco"
 
         try:
@@ -558,7 +575,7 @@ class App:
             messagebox.showinfo("Éxito", "Pregunta agregada a la asamblea.")
             self.question_text_entry.delete(0, tk.END)
             self.question_options_entry.delete(0, tk.END)
-            self.question_options_entry.insert(0, "Acepta,No Acepta,En Blanco")  # Reset a default
+            self.question_options_entry.insert(0, "Acepta,No Acepta,En Blanco")
             self.load_questions_for_assembly()
             self.load_questions_for_voting_tab()
         except Exception as e:
@@ -584,11 +601,11 @@ class App:
         question_select_frame.pack(padx=10, pady=10, fill="x")
 
         ttk.Label(question_select_frame, text="Pregunta:").pack(side=tk.LEFT, padx=5)
-        self.voting_question_combobox = ttk.Combobox(question_select_frame, state="readonly", width=70)  # Más ancho
+        self.voting_question_combobox = ttk.Combobox(question_select_frame, state="readonly", width=70)
         self.voting_question_combobox.pack(side=tk.LEFT, padx=5)
         self.voting_question_combobox.bind("<<ComboboxSelected>>", self.on_voting_question_selected_for_display)
 
-        button_frame_votacion = ttk.Frame(question_select_frame)  # Frame para botones
+        button_frame_votacion = ttk.Frame(question_select_frame)
         button_frame_votacion.pack(side=tk.LEFT, padx=10)
         ttk.Button(button_frame_votacion, text="Activar Pregunta", command=self.activate_question_for_voting).pack(
             side=tk.TOP, pady=2)
@@ -605,13 +622,11 @@ class App:
         self.voting_resident_combobox = ttk.Combobox(vote_entry_frame, state="readonly", width=40)
         self.voting_resident_combobox.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
 
-        ttk.Label(vote_entry_frame, text="Opción de Voto:").grid(row=1, column=0, padx=5, pady=5,
-                                                                 sticky="nw")  # sticky nw
+        ttk.Label(vote_entry_frame, text="Opción de Voto:").grid(row=1, column=0, padx=5, pady=5, sticky="nw")
 
-        # Frame para los radiobuttons dinámicos
         self.options_radio_frame = ttk.Frame(vote_entry_frame)
         self.options_radio_frame.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        self.vote_option_var_string = tk.StringVar()  # Usar StringVar para texto de opción
+        self.vote_option_var_string = tk.StringVar()
 
         ttk.Button(vote_entry_frame, text="Registrar Voto", command=self.register_vote).grid(row=2, column=0,
                                                                                              columnspan=2, pady=10)
@@ -641,50 +656,53 @@ class App:
             else:
                 self.voting_question_combobox.set('')
                 self.clear_voting_area()
-                ttk.Label(self.results_display_frame, text="No hay preguntas para esta asamblea.").pack(pady=20)
+                if hasattr(self.results_display_frame,
+                           'winfo_exists') and self.results_display_frame.winfo_exists():  # Check if frame exists
+                    ttk.Label(self.results_display_frame, text="No hay preguntas para esta asamblea.").pack(pady=20)
         else:
             self.voting_question_combobox['values'] = []
             self.voting_question_combobox.set('')
             self.clear_voting_area()
 
     def clear_voting_area(self):
-        """Limpia el área de opciones de voto y resultados."""
         self.current_question_id = None
         self.current_question_options = []
-        self.active_question_label.config(text="Pregunta Activa: Ninguna")
-        self.voting_resident_combobox.set('')
-        self.voting_resident_combobox['values'] = []
-        self.vote_option_var_string.set("")
+        if hasattr(self, 'active_question_label'): self.active_question_label.config(text="Pregunta Activa: Ninguna")
+        if hasattr(self, 'voting_resident_combobox'):
+            self.voting_resident_combobox.set('')
+            self.voting_resident_combobox['values'] = []
+        if hasattr(self, 'vote_option_var_string'): self.vote_option_var_string.set("")
 
-        if hasattr(self, 'options_radio_frame'):
+        if hasattr(self, 'options_radio_frame') and self.options_radio_frame.winfo_exists():
             for widget in self.options_radio_frame.winfo_children():
                 widget.destroy()
 
         if hasattr(self, 'results_canvas_widget') and self.results_canvas_widget:
-            self.results_canvas_widget.get_tk_widget().destroy()
+            self.results_canvas_widget.destroy()
             self.results_canvas_widget = None
-        if hasattr(self, 'results_display_frame'):  # Limpiar también etiquetas de texto
+        if hasattr(self, 'results_display_frame') and self.results_display_frame.winfo_exists():
             for widget in self.results_display_frame.winfo_children():
-                widget.destroy()
+                if widget != self.results_canvas_widget:
+                    widget.destroy()
 
     def on_voting_question_selected_for_display(self, event=None):
         selection = self.voting_question_combobox.get()
         if selection:
             try:
                 question_id_to_display = int(selection.split(":")[0])
-                # Si la pregunta seleccionada NO es la pregunta activa para votación,
-                # solo mostramos sus resultados y no actualizamos los radiobuttons de voto.
                 if question_id_to_display != self.current_question_id:
                     self.update_vote_options_ui(question_id_to_display, for_display_only=True)
+                else:
+                    self.update_vote_options_ui(question_id_to_display, for_display_only=False)
                 self.display_vote_results_for_question(question_id_to_display)
 
             except ValueError:
                 messagebox.showerror("Error", "Formato de selección de pregunta inválido.")
 
     def update_vote_options_ui(self, question_id, for_display_only=False):
-        """Actualiza los radiobuttons de opciones de voto para la pregunta dada."""
-        for widget in self.options_radio_frame.winfo_children():
-            widget.destroy()
+        if hasattr(self, 'options_radio_frame') and self.options_radio_frame.winfo_exists():
+            for widget in self.options_radio_frame.winfo_children():
+                widget.destroy()
 
         self.current_question_options = []
         question_data = self.execute_query("SELECT opciones_configuradas FROM preguntas WHERE id = ?", (question_id,),
@@ -692,18 +710,20 @@ class App:
 
         if question_data and question_data[0]:
             self.current_question_options = [opt.strip() for opt in question_data[0].split(',')]
-        else:  # Opciones por defecto si no hay nada configurado o la pregunta no existe
+        else:
             self.current_question_options = ["Acepta", "No Acepta", "En Blanco"]
 
-        self.vote_option_var_string.set("")  # Deseleccionar opción previa
+        if hasattr(self, 'vote_option_var_string'): self.vote_option_var_string.set("")
 
-        if not for_display_only:  # Solo crear radiobuttons si estamos activando para votar
+        if not for_display_only or self.current_question_id == question_id:
             for option_text in self.current_question_options:
                 rb = ttk.Radiobutton(self.options_radio_frame, text=option_text, variable=self.vote_option_var_string,
                                      value=option_text)
                 rb.pack(anchor=tk.W, pady=2)
-        elif not self.current_question_id:  # Si no hay pregunta activa, mostrar un mensaje
-            ttk.Label(self.options_radio_frame, text="Active una pregunta para ver opciones de voto.").pack(anchor=tk.W)
+        elif not self.current_question_id and for_display_only:
+            if hasattr(self, 'options_radio_frame') and self.options_radio_frame.winfo_exists():
+                ttk.Label(self.options_radio_frame,
+                          text="Las opciones de voto se mostrarán al activar la pregunta.").pack(anchor=tk.W)
 
     def activate_question_for_voting(self):
         selection = self.voting_question_combobox.get()
@@ -730,7 +750,7 @@ class App:
         question_text = selection.split(":", 1)[1].strip()
         self.active_question_label.config(text=f"Pregunta Activa (ID: {self.current_question_id}): {question_text}")
 
-        self.update_vote_options_ui(self.current_question_id)  # Actualizar radiobuttons
+        self.update_vote_options_ui(self.current_question_id, for_display_only=False)
         self.load_eligible_voters()
         self.display_vote_results_for_question(self.current_question_id)
         self.load_questions_for_assembly()
@@ -751,7 +771,7 @@ class App:
 
         messagebox.showinfo("Votación Cerrada",
                             f"Se ha cerrado la votación para la pregunta: '{question_text_closed}'.")
-        self.display_vote_results_for_question(question_id_to_close, final=True)
+        self.display_vote_results_for_question(question_id_to_close, final=True)  # Guardar gráfico final
 
         self.current_question_id = None
         self.current_question_options = []
@@ -759,7 +779,8 @@ class App:
         self.voting_resident_combobox.set('')
         self.voting_resident_combobox['values'] = []
         self.vote_option_var_string.set("")
-        for widget in self.options_radio_frame.winfo_children(): widget.destroy()  # Limpiar radiobuttons
+        if hasattr(self, 'options_radio_frame') and self.options_radio_frame.winfo_exists():
+            for widget in self.options_radio_frame.winfo_children(): widget.destroy()
 
     def load_eligible_voters(self):
         if not self.current_assembly_id:
@@ -793,12 +814,12 @@ class App:
             messagebox.showerror("Error", "Ninguna pregunta está activa para votación.")
             return
         voter_selection = self.voting_resident_combobox.get()
-        opcion_elegida_str = self.vote_option_var_string.get()  # Obtener el texto de la opción
+        opcion_elegida_str = self.vote_option_var_string.get()
 
         if not voter_selection:
             messagebox.showerror("Error", "Seleccione el residente que está votando.")
             return
-        if not opcion_elegida_str:  # Verificar que se haya seleccionado una opción
+        if not opcion_elegida_str:
             messagebox.showerror("Error", "Seleccione una opción de voto.")
             return
         try:
@@ -823,8 +844,8 @@ class App:
                                    (self.current_question_id, cedula_votante, opcion_elegida_str), commit=True)
                 messagebox.showinfo("Éxito", "Voto registrado.")
 
-            self.display_vote_results_for_question(self.current_question_id)
-            self.vote_option_var_string.set("")  # Resetear opción de voto
+            self.display_vote_results_for_question(self.current_question_id)  # Guardar gráfico parcial
+            self.vote_option_var_string.set("")
         except ValueError:
             messagebox.showerror("Error", "Selección de residente inválida.")
         except Exception as e:
@@ -858,17 +879,22 @@ class App:
     def display_vote_results_for_question(self, question_id_for_results, final=False):
         if not self.current_assembly_id:
             messagebox.showwarning("Advertencia", "No hay una asamblea seleccionada.")
-            self.clear_voting_area()  # Limpiar área de resultados si no hay asamblea
+            self.clear_voting_area()
             return
         if not question_id_for_results:
             self.clear_voting_area()
-            ttk.Label(self.results_display_frame, text="Seleccione una pregunta para ver sus resultados.").pack(pady=20)
+            if hasattr(self.results_display_frame, 'winfo_exists') and self.results_display_frame.winfo_exists():
+                ttk.Label(self.results_display_frame, text="Seleccione una pregunta para ver sus resultados.").pack(
+                    pady=20)
             return
 
         if hasattr(self, 'results_canvas_widget') and self.results_canvas_widget:
-            self.results_canvas_widget.get_tk_widget().destroy()
-        for widget in self.results_display_frame.winfo_children(): widget.destroy()
-        self.results_canvas_widget = None
+            self.results_canvas_widget.destroy()
+            self.results_canvas_widget = None
+
+        if hasattr(self, 'results_display_frame') and self.results_display_frame.winfo_exists():
+            for widget in self.results_display_frame.winfo_children():
+                widget.destroy()
 
         votes_data = self.execute_query(
             "SELECT cedula_votante, opcion_elegida FROM votos WHERE pregunta_id = ?",
@@ -877,8 +903,10 @@ class App:
         q_info = self.execute_query("SELECT texto_pregunta, activa, opciones_configuradas FROM preguntas WHERE id = ?",
                                     (question_id_for_results,), fetchone=True)
         if not q_info:
-            ttk.Label(self.results_display_frame,
-                      text=f"No se encontró información para la pregunta ID {question_id_for_results}.").pack(pady=20)
+            if hasattr(self.results_display_frame, 'winfo_exists') and self.results_display_frame.winfo_exists():
+                ttk.Label(self.results_display_frame,
+                          text=f"No se encontró información para la pregunta ID {question_id_for_results}.").pack(
+                    pady=20)
             return
 
         q_text, q_is_active_in_db, q_options_str = q_info
@@ -886,7 +914,9 @@ class App:
                                                                                                   "En Blanco"]
 
         if not votes_data:
-            ttk.Label(self.results_display_frame, text=f"Aún no hay votos registrados para:\n'{q_text}'").pack(pady=20)
+            if hasattr(self.results_display_frame, 'winfo_exists') and self.results_display_frame.winfo_exists():
+                ttk.Label(self.results_display_frame, text=f"Aún no hay votos registrados para:\n'{q_text}'").pack(
+                    pady=20)
             return
 
         voting_weights_for_assembly = self.get_voting_weights()
@@ -902,9 +932,8 @@ class App:
         chart_sizes = []
         raw_counts_display = Counter()
 
-        # Asegurar que todas las opciones configuradas aparezcan, incluso si no tienen votos
         for option_text_label in q_options_list:
-            total_weight_for_option = weighted_results[option_text_label]  # Será 0 si no hay votos
+            total_weight_for_option = weighted_results[option_text_label]
 
             count_for_option = sum(1 for _, o_elegida in votes_data if o_elegida == option_text_label)
             raw_counts_display[option_text_label] = count_for_option
@@ -917,11 +946,12 @@ class App:
             chart_sizes.append(total_weight_for_option)
 
         if not chart_sizes or all(s == 0 for s in chart_sizes):
-            ttk.Label(self.results_display_frame,
-                      text=f"No hay votos con peso válidos para graficar para:\n'{q_text}'").pack(pady=20)
+            if hasattr(self.results_display_frame, 'winfo_exists') and self.results_display_frame.winfo_exists():
+                ttk.Label(self.results_display_frame,
+                          text=f"No hay votos con peso válidos para graficar para:\n'{q_text}'").pack(pady=20)
             return
 
-        fig, ax = plt.subplots(figsize=(6, 4.5))  # Un poco más alto para la leyenda
+        fig, ax = plt.subplots(figsize=(6, 4.5))
 
         wedges, texts, autotexts = ax.pie(
             chart_sizes, labels=None,
@@ -931,7 +961,7 @@ class App:
         ax.axis('equal')
         ax.legend(wedges, chart_labels, title="Opciones", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1),
                   fontsize='small')
-        plt.subplots_adjust(left=0.05, right=0.65, top=0.9, bottom=0.05)  # Ajustar márgenes
+        plt.subplots_adjust(left=0.05, right=0.65, top=0.9, bottom=0.05)
 
         title_text = f"Resultados: {q_text}"
         if final:
@@ -953,13 +983,41 @@ class App:
             participation = (total_weighted_votes_cast / total_possible_weight_in_assembly) * 100
             info_text_lines.append(f"Participación (peso emitido vs. posible): {participation:.1f}%")
 
-        ttk.Label(self.results_display_frame, text="\n".join(info_text_lines), justify=tk.LEFT, wraplength=380).pack(
-            pady=5, anchor='w', padx=5)
+        if hasattr(self.results_display_frame, 'winfo_exists') and self.results_display_frame.winfo_exists():
+            ttk.Label(self.results_display_frame, text="\n".join(info_text_lines), justify=tk.LEFT,
+                      wraplength=380).pack(pady=5, anchor='w', padx=5)
 
-        canvas = FigureCanvasTkAgg(fig, master=self.results_display_frame)
-        canvas.draw()
-        self.results_canvas_widget = canvas.get_tk_widget()
-        self.results_canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            # --- GUARDAR GRÁFICO COMO IMAGEN ---
+            try:
+                # Asegurarse de que el directorio de gráficos exista (ya se intenta en init_app_dirs_and_db)
+                if not os.path.exists(GRAFICOS_DIR):
+                    os.makedirs(GRAFICOS_DIR)
+
+                # Construir nombre de archivo
+                safe_q_text = "".join(c if c.isalnum() else "_" for c in q_text[:30])  # Nombre de archivo seguro
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename_suffix = "final" if final else "parcial"
+
+                # Nombre de archivo más específico para evitar sobrescribir si se actualiza varias veces el parcial
+                # Si es final, solo un archivo final. Si es parcial, podría tener timestamp.
+                if final:
+                    image_filename = f"asamblea_{self.current_assembly_id}_pregunta_{question_id_for_results}_{safe_q_text}_{filename_suffix}.png"
+                else:
+                    image_filename = f"asamblea_{self.current_assembly_id}_pregunta_{question_id_for_results}_{safe_q_text}_{filename_suffix}_{timestamp}.png"
+
+                filepath = os.path.join(GRAFICOS_DIR, image_filename)
+                fig.savefig(filepath, bbox_inches='tight')  # bbox_inches='tight' para que no se corte la leyenda
+                print(f"Gráfico guardado en: {filepath}")
+            except Exception as e:
+                print(f"Error al guardar el gráfico como imagen: {e}")
+                messagebox.showwarning("Error al Guardar Gráfico", f"No se pudo guardar el gráfico como imagen:\n{e}")
+            # --- FIN DE GUARDAR GRÁFICO ---
+
+            figure_canvas = FigureCanvasTkAgg(fig, master=self.results_display_frame)
+            self.results_canvas_widget = figure_canvas.get_tk_widget()
+            self.results_canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            figure_canvas.draw()
+
         plt.close(fig)
 
 
@@ -968,4 +1026,3 @@ if __name__ == '__main__':
     root = tk.Tk()
     app = App(root)
     root.mainloop()
-
