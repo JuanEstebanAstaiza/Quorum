@@ -17,17 +17,14 @@ ESTADO_PREGUNTA_INACTIVA = 'inactiva'
 ESTADO_PREGUNTA_ACTIVA = 'activa'
 ESTADO_PREGUNTA_CERRADA = 'cerrada'
 
-# Constantes para tipos de residente
-TIPO_RESIDENTE_REPRESENTANTE = 'representante'
-TIPO_RESIDENTE_ASISTENTE = 'asistente'
-
-# Constante para límite de inasistencias
-LIMITE_INASISTENCIAS_VOTO = 3
+# Constantes para tipos de asistente (en tabla asistencia)
+TIPO_ASISTENTE_PROPIETARIO = 'Propietario'
+TIPO_ASISTENTE_APODERADO = 'Apoderado'
 
 
 # --- Funciones de Base de Datos e Inicialización ---
 def init_app_dirs_and_db():
-    # (Sin cambios)
+    """Inicializa directorios y la DB con la nueva estructura v6."""
     if not os.path.exists(HOST_DATA_DIR):
         try:
             os.makedirs(HOST_DATA_DIR)
@@ -41,27 +38,86 @@ def init_app_dirs_and_db():
 
     conn = sqlite3.connect(DB_NAME);
     cursor = conn.cursor()
-    cursor.execute(
-        '''CREATE TABLE IF NOT EXISTS residentes (cedula TEXT PRIMARY KEY, nombre TEXT NOT NULL, celular TEXT UNIQUE NOT NULL, casa TEXT NOT NULL, activo INTEGER DEFAULT 1, telegram_user_id INTEGER UNIQUE, tipo_residente TEXT DEFAULT 'representante', preguntas_consecutivas_sin_votar INTEGER DEFAULT 0, ultima_asamblea_actividad INTEGER)''')
-    cols_to_add = {'tipo_residente': f"TEXT DEFAULT '{TIPO_RESIDENTE_REPRESENTANTE}'",
-                   'preguntas_consecutivas_sin_votar': "INTEGER DEFAULT 0", 'ultima_asamblea_actividad': "INTEGER"}
-    existing_cols = [col[1] for col in cursor.execute("PRAGMA table_info(residentes)").fetchall()]
-    for col, col_type in cols_to_add.items():
-        if col not in existing_cols:
-            try:
-                print(f"Añadiendo columna '{col}' a 'residentes'."); cursor.execute(
-                    f"ALTER TABLE residentes ADD COLUMN {col} {col_type}"); conn.commit()
-            except sqlite3.Error as e:
-                print(f"Error añadiendo {col}: {e}")
-    cursor.execute(
-        '''CREATE TABLE IF NOT EXISTS asambleas (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT NOT NULL, descripcion TEXT)''')
-    cursor.execute(
-        '''CREATE TABLE IF NOT EXISTS poderes (id INTEGER PRIMARY KEY AUTOINCREMENT, asamblea_id INTEGER NOT NULL, cedula_da_poder TEXT NOT NULL, cedula_recibe_poder TEXT NOT NULL, FOREIGN KEY (asamblea_id) REFERENCES asambleas(id), FOREIGN KEY (cedula_da_poder) REFERENCES residentes(cedula), FOREIGN KEY (cedula_recibe_poder) REFERENCES residentes(cedula), UNIQUE (asamblea_id, cedula_da_poder))''')
-    cursor.execute(
-        '''CREATE TABLE IF NOT EXISTS preguntas (id INTEGER PRIMARY KEY AUTOINCREMENT, asamblea_id INTEGER NOT NULL, texto_pregunta TEXT NOT NULL, opciones_configuradas TEXT, estado TEXT DEFAULT 'inactiva', FOREIGN KEY (asamblea_id) REFERENCES asambleas(id))''')
+
+    # --- Tabla propietarios (antes residentes) ---
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS propietarios (
+        cedula TEXT PRIMARY KEY,
+        nombre TEXT NOT NULL,
+        celular TEXT UNIQUE, -- Puede ser nulo si no se tiene
+        activo INTEGER DEFAULT 1
+    )
+    ''')
+    # Limpiar columnas antiguas si existen (para migración simple)
     try:
-        cursor.execute("SELECT activa FROM preguntas LIMIT 1"); print(
-            "Migrando 'activa' a 'estado' en 'preguntas'."); cursor.execute(
+        cursor.execute("SELECT tipo_residente FROM propietarios LIMIT 1"); cursor.execute(
+            "ALTER TABLE propietarios DROP COLUMN tipo_residente"); print("Columna tipo_residente eliminada.")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cursor.execute("SELECT casa FROM propietarios LIMIT 1"); cursor.execute(
+            "ALTER TABLE propietarios DROP COLUMN casa"); print("Columna casa eliminada.")
+    except sqlite3.OperationalError:
+        pass
+    # ... (eliminar otras columnas si es necesario para limpieza)
+
+    # --- Tabla unidades ---
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS unidades (
+        id_unidad INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre_unidad TEXT UNIQUE NOT NULL, 
+        coeficiente REAL DEFAULT 0.0,
+        cedula_propietario TEXT,
+        FOREIGN KEY (cedula_propietario) REFERENCES propietarios(cedula) ON DELETE SET NULL ON UPDATE CASCADE 
+        -- ON DELETE SET NULL: Si se borra un propietario, la unidad queda sin propietario asignado
+        -- ON UPDATE CASCADE: Si cambia la cédula del propietario (no debería pasar con PK), se actualiza aquí
+    )
+    ''')
+
+    # --- Tabla asambleas ---
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS asambleas (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT NOT NULL, descripcion TEXT)
+    ''')
+
+    # --- Tabla poderes ---
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS poderes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        asamblea_id INTEGER NOT NULL, 
+        id_unidad_da_poder INTEGER NOT NULL, -- FK a unidades
+        cedula_apoderado TEXT NOT NULL, 
+        nombre_apoderado TEXT, -- Nombre del apoderado (puede no ser propietario)
+        FOREIGN KEY (asamblea_id) REFERENCES asambleas(id) ON DELETE CASCADE, 
+        FOREIGN KEY (id_unidad_da_poder) REFERENCES unidades(id_unidad) ON DELETE CASCADE,
+        UNIQUE (asamblea_id, id_unidad_da_poder) -- Solo un poder por unidad por asamblea
+    )
+    ''')
+
+    # --- Tabla asistencia ---
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS asistencia (
+        id_asistencia INTEGER PRIMARY KEY AUTOINCREMENT,
+        asamblea_id INTEGER NOT NULL,
+        cedula_asistente TEXT NOT NULL, -- Cédula del propietario o apoderado
+        nombre_asistente TEXT,
+        tipo_asistente TEXT NOT NULL, -- 'Propietario' o 'Apoderado'
+        presente INTEGER DEFAULT 0, -- 1 si está presente
+        FOREIGN KEY (asamblea_id) REFERENCES asambleas(id) ON DELETE CASCADE,
+        UNIQUE (asamblea_id, cedula_asistente)
+    )
+    ''')
+
+    # --- Tabla preguntas ---
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS preguntas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, asamblea_id INTEGER NOT NULL, texto_pregunta TEXT NOT NULL,
+        opciones_configuradas TEXT, estado TEXT DEFAULT 'inactiva', 
+        FOREIGN KEY (asamblea_id) REFERENCES asambleas(id) ON DELETE CASCADE
+    )
+    ''')
+    # Código de migración de estado (si es necesario)
+    try:
+        cursor.execute("SELECT activa FROM preguntas LIMIT 1"); print("Migrando 'activa' a 'estado'"); cursor.execute(
             "ALTER TABLE preguntas RENAME COLUMN activa TO estado_old_int"); cursor.execute(
             f"ALTER TABLE preguntas ADD COLUMN estado TEXT DEFAULT '{ESTADO_PREGUNTA_INACTIVA}'"); cursor.execute(
             f"UPDATE preguntas SET estado = '{ESTADO_PREGUNTA_ACTIVA}' WHERE estado_old_int = 1"); cursor.execute(
@@ -74,43 +130,75 @@ def init_app_dirs_and_db():
     except sqlite3.OperationalError:
         print("Añadiendo 'estado' a 'preguntas'."); cursor.execute(
             f"ALTER TABLE preguntas ADD COLUMN estado TEXT DEFAULT '{ESTADO_PREGUNTA_INACTIVA}'"); conn.commit()
-    cursor.execute(
-        '''CREATE TABLE IF NOT EXISTS votos (id INTEGER PRIMARY KEY AUTOINCREMENT, pregunta_id INTEGER NOT NULL, cedula_votante TEXT NOT NULL, opcion_elegida TEXT NOT NULL, FOREIGN KEY (pregunta_id) REFERENCES preguntas(id), FOREIGN KEY (cedula_votante) REFERENCES residentes(cedula), UNIQUE (pregunta_id, cedula_votante))''')
+
+    # --- Tabla votos ---
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS votos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        pregunta_id INTEGER NOT NULL, 
+        id_unidad_representada INTEGER NOT NULL, -- Unidad por la que se vota
+        cedula_ejecuta_voto TEXT, -- Quien hizo clic (puede ser NULL si es 'No Votó')
+        opcion_elegida TEXT NOT NULL, 
+        FOREIGN KEY (pregunta_id) REFERENCES preguntas(id) ON DELETE CASCADE, 
+        FOREIGN KEY (id_unidad_representada) REFERENCES unidades(id_unidad) ON DELETE CASCADE,
+        -- No ponemos FK a propietarios para cedula_ejecuta_voto porque puede ser un apoderado no propietario
+        UNIQUE (pregunta_id, id_unidad_representada) -- Solo un voto por unidad por pregunta
+    )
+    ''')
+
+    # Habilitar claves foráneas (importante para ON DELETE CASCADE)
+    cursor.execute("PRAGMA foreign_keys = ON")
+
     conn.commit();
     conn.close()
 
 
 # --- Clases de la Aplicación ---
 class App:
-    # ... ( __init__ y execute_query sin cambios) ...
     def __init__(self, root):
         self.root = root;
-        self.root.title("Gestión de Asambleas");
-        self.root.geometry("1150x800")
+        self.root.title("Gestión Asambleas Condominio v6");
+        self.root.geometry("1200x800")
         style = ttk.Style();
         style.theme_use('clam')
         self.current_assembly_id = None;
         self.current_question_id = None
         self.current_question_options = [];
         self.editing_question_id = None
+        self.asistencia_data = {}  # Para manejar estado de asistencia en la UI
+
         self.notebook = ttk.Notebook(root)
-        self.resident_tab = ttk.Frame(self.notebook);
-        self.notebook.add(self.resident_tab, text='Residentes');
-        self.setup_resident_tab()
-        self.assembly_tab = ttk.Frame(self.notebook);
-        self.notebook.add(self.assembly_tab, text='Asambleas');
-        self.setup_assembly_tab()
+
+        # Pestañas Reorganizadas/Nuevas
+        self.propietario_tab = ttk.Frame(self.notebook);
+        self.notebook.add(self.propietario_tab, text='Propietarios');
+        self.setup_propietario_tab()
+        self.unidad_tab = ttk.Frame(self.notebook);
+        self.notebook.add(self.unidad_tab, text='Unidades');
+        self.setup_unidad_tab()
+        self.asamblea_tab = ttk.Frame(self.notebook);
+        self.notebook.add(self.asamblea_tab, text='Asambleas/Poderes');
+        self.setup_asamblea_tab()
+        self.asistencia_tab = ttk.Frame(self.notebook);
+        self.notebook.add(self.asistencia_tab, text='Asistencia');
+        self.setup_asistencia_tab()
         self.voting_tab = ttk.Frame(self.notebook);
         self.notebook.add(self.voting_tab, text='Votación');
         self.setup_voting_tab()
+        # Pestaña Lista Votación (pendiente)
+        # self.lista_vt_tab = ttk.Frame(self.notebook); self.notebook.add(self.lista_vt_tab, text='Lista Votación'); # self.setup_lista_vt_tab()
+
         self.notebook.pack(expand=True, fill='both', padx=10, pady=10)
-        init_app_dirs_and_db();
-        self.load_residents();
-        self.load_assemblies()
+        init_app_dirs_and_db()
+        self.load_propietarios();
+        self.load_unidades();
+        self.load_asambleas()  # Cargar asambleas al inicio
 
     def execute_query(self, query, params=(), fetchone=False, fetchall=False, commit=False):
         conn = sqlite3.connect(DB_NAME);
-        cursor = conn.cursor()
+        conn.execute("PRAGMA foreign_keys = ON")  # Asegurar que FK estén habilitadas en cada conexión
+        cursor = conn.cursor();
+        result = None
         try:
             cursor.execute(query, params)
             if commit: conn.commit()
@@ -122,181 +210,270 @@ class App:
             if conn: conn.close()
         return result
 
-    # --- Pestaña de Residentes (sin cambios) ---
-    def setup_resident_tab(self):
-        frame = self.resident_tab;
-        form_frame = ttk.LabelFrame(frame, text="Registrar/Actualizar Residente", padding=10);
+    # --- Pestaña Propietarios ---
+    def setup_propietario_tab(self):
+        frame = self.propietario_tab
+        form_frame = ttk.LabelFrame(frame, text="Registrar/Actualizar Propietario", padding=10);
         form_frame.pack(padx=10, pady=10, fill="x")
         ttk.Label(form_frame, text="Cédula:").grid(row=0, column=0, padx=5, pady=5, sticky="w");
-        self.resident_cedula_entry = ttk.Entry(form_frame, width=40);
-        self.resident_cedula_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        self.prop_cedula_entry = ttk.Entry(form_frame, width=40);
+        self.prop_cedula_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
         ttk.Label(form_frame, text="Nombre:").grid(row=1, column=0, padx=5, pady=5, sticky="w");
-        self.resident_name_entry = ttk.Entry(form_frame, width=40);
-        self.resident_name_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        self.prop_nombre_entry = ttk.Entry(form_frame, width=40);
+        self.prop_nombre_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
         ttk.Label(form_frame, text="Celular:").grid(row=2, column=0, padx=5, pady=5, sticky="w");
-        self.resident_phone_entry = ttk.Entry(form_frame, width=40);
-        self.resident_phone_entry.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Label(form_frame, text="Casa/Apto:").grid(row=3, column=0, padx=5, pady=5, sticky="w");
-        self.resident_house_entry = ttk.Entry(form_frame, width=40);
-        self.resident_house_entry.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Label(form_frame, text="Tipo:").grid(row=4, column=0, padx=5, pady=5, sticky="w");
-        self.resident_type_var = tk.StringVar();
-        self.resident_type_combobox = ttk.Combobox(form_frame, textvariable=self.resident_type_var,
-                                                   values=[TIPO_RESIDENTE_REPRESENTANTE.capitalize(),
-                                                           TIPO_RESIDENTE_ASISTENTE.capitalize()], state="readonly",
-                                                   width=38);
-        self.resident_type_combobox.grid(row=4, column=1, padx=5, pady=5, sticky="ew");
-        self.resident_type_combobox.set(TIPO_RESIDENTE_REPRESENTANTE.capitalize())
-        self.resident_cedula_to_update = None
+        self.prop_celular_entry = ttk.Entry(form_frame, width=40);
+        self.prop_celular_entry.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+        self.prop_cedula_to_update = None
         button_frame = ttk.Frame(form_frame);
-        button_frame.grid(row=5, column=0, columnspan=2, pady=10)
-        ttk.Button(button_frame, text="Guardar Residente", command=self.save_resident).pack(side=tk.LEFT, padx=5);
-        ttk.Button(button_frame, text="Limpiar Campos", command=self.clear_resident_fields).pack(side=tk.LEFT, padx=5)
-        list_frame = ttk.LabelFrame(frame, text="Lista de Residentes (Activos e Inactivos)", padding=10);
+        button_frame.grid(row=3, column=0, columnspan=2, pady=10)
+        ttk.Button(button_frame, text="Guardar Propietario", command=self.save_propietario).pack(side=tk.LEFT, padx=5);
+        ttk.Button(button_frame, text="Limpiar", command=self.clear_propietario_fields).pack(side=tk.LEFT, padx=5)
+
+        list_frame = ttk.LabelFrame(frame, text="Lista Propietarios", padding=10);
         list_frame.pack(padx=10, pady=10, fill="both", expand=True)
-        columns = ("cedula", "nombre", "tipo", "estado_act", "ausencias", "celular", "casa")
-        self.resident_tree = ttk.Treeview(list_frame, columns=columns, show="headings")
-        self.resident_tree.heading("cedula", text="Cédula");
-        self.resident_tree.column("cedula", width=90, anchor=tk.W)
-        self.resident_tree.heading("nombre", text="Nombre");
-        self.resident_tree.column("nombre", width=200, anchor=tk.W)
-        self.resident_tree.heading("tipo", text="Tipo");
-        self.resident_tree.column("tipo", width=90, anchor=tk.W)
-        self.resident_tree.heading("estado_act", text="Estado");
-        self.resident_tree.column("estado_act", width=70, anchor=tk.W)
-        self.resident_tree.heading("ausencias", text="Aus Voto");
-        self.resident_tree.column("ausencias", width=60, anchor=tk.CENTER)
-        self.resident_tree.heading("celular", text="Celular");
-        self.resident_tree.column("celular", width=90, anchor=tk.W)
-        self.resident_tree.heading("casa", text="Casa/Apto");
-        self.resident_tree.column("casa", width=70, anchor=tk.W)
-        self.resident_tree.pack(fill="both", expand=True, side=tk.LEFT)
-        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.resident_tree.yview);
-        self.resident_tree.configure(yscrollcommand=scrollbar.set);
+        columns = ("cedula", "nombre", "celular", "estado_act")
+        self.propietario_tree = ttk.Treeview(list_frame, columns=columns, show="headings")
+        for col in columns: self.propietario_tree.heading(col, text=col.replace('_',
+                                                                                ' ').capitalize()); self.propietario_tree.column(
+            col, width=150 if col != "nombre" else 250, anchor=tk.W)
+        self.propietario_tree.pack(fill="both", expand=True, side=tk.LEFT)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.propietario_tree.yview);
+        self.propietario_tree.configure(yscrollcommand=scrollbar.set);
         scrollbar.pack(side=tk.RIGHT, fill="y")
-        self.resident_tree.bind("<<TreeviewSelect>>", self.on_resident_select)
-        resident_actions_frame = ttk.Frame(list_frame);
-        resident_actions_frame.pack(pady=5, fill="x")
-        ttk.Button(resident_actions_frame, text="Activar/Desactivar", command=self.toggle_resident_activation).pack(
+        self.propietario_tree.bind("<<TreeviewSelect>>", self.on_propietario_select)
+        actions_frame = ttk.Frame(list_frame);
+        actions_frame.pack(pady=5, fill="x")
+        ttk.Button(actions_frame, text="Activar/Desactivar", command=self.toggle_propietario_activation).pack(
             side=tk.LEFT, padx=5)
-        ttk.Button(resident_actions_frame, text="Refrescar", command=self.load_residents).pack(side=tk.LEFT, padx=5)
+        ttk.Button(actions_frame, text="Refrescar", command=self.load_propietarios).pack(side=tk.LEFT, padx=5)
 
-    def clear_resident_fields(self):
-        self.resident_cedula_entry.config(state='normal');
-        self.resident_cedula_entry.delete(0, tk.END)
-        self.resident_name_entry.delete(0, tk.END);
-        self.resident_phone_entry.delete(0, tk.END);
-        self.resident_house_entry.delete(0, tk.END)
-        self.resident_type_combobox.set(TIPO_RESIDENTE_REPRESENTANTE.capitalize());
-        self.resident_cedula_to_update = None;
-        self.resident_cedula_entry.focus()
+    def clear_propietario_fields(self):
+        self.prop_cedula_entry.config(state='normal');
+        self.prop_cedula_entry.delete(0, tk.END)
+        self.prop_nombre_entry.delete(0, tk.END);
+        self.prop_celular_entry.delete(0, tk.END)
+        self.prop_cedula_to_update = None;
+        self.prop_cedula_entry.focus()
 
-    def save_resident(self):
-        cedula = self.resident_cedula_entry.get().strip();
-        nombre = self.resident_name_entry.get().strip();
-        celular = self.resident_phone_entry.get().strip();
-        casa = self.resident_house_entry.get().strip();
-        tipo_residente_ui = self.resident_type_var.get().lower()
-        if not cedula or not nombre or not celular or not casa or not tipo_residente_ui: messagebox.showerror("Error",
-                                                                                                              "Todos los campos obligatorios."); return
-        if tipo_residente_ui not in [TIPO_RESIDENTE_REPRESENTANTE, TIPO_RESIDENTE_ASISTENTE]: messagebox.showerror(
-            "Error", f"Tipo inválido: {tipo_residente_ui}"); return
-        if tipo_residente_ui == TIPO_RESIDENTE_REPRESENTANTE:
-            query = "SELECT cedula, nombre FROM residentes WHERE casa = ? AND tipo_residente = ? AND activo = 1"
-            params = [casa, TIPO_RESIDENTE_REPRESENTANTE]
-            if self.resident_cedula_to_update: query += " AND cedula != ?"; params.append(
-                self.resident_cedula_to_update)
-            existing_rep = self.execute_query(query, tuple(params), fetchone=True)
-            if existing_rep: messagebox.showerror("Error Representante",
-                                                  f"Ya existe rep. activo ('{existing_rep[1]}', Céd: {existing_rep[0]}) para unidad '{casa}'.\nSolo 1 rep. por unidad."); return
+    def save_propietario(self):
+        cedula = self.prop_cedula_entry.get().strip();
+        nombre = self.prop_nombre_entry.get().strip();
+        celular = self.prop_celular_entry.get().strip()
+        if not cedula or not nombre: messagebox.showerror("Error", "Cédula y Nombre obligatorios."); return
         try:
-            if self.resident_cedula_to_update:
-                self.execute_query("UPDATE residentes SET nombre=?, celular=?, casa=?, tipo_residente=? WHERE cedula=?",
-                                   (nombre, celular, casa, tipo_residente_ui, self.resident_cedula_to_update),
-                                   commit=True)
-                messagebox.showinfo("Éxito", "Residente actualizado.");
+            if self.prop_cedula_to_update:
+                self.execute_query("UPDATE propietarios SET nombre=?, celular=? WHERE cedula=?",
+                                   (nombre, celular, self.prop_cedula_to_update), commit=True);
+                messagebox.showinfo("Éxito", "Propietario actualizado.")
             else:
-                self.execute_query(
-                    "INSERT INTO residentes (cedula, nombre, celular, casa, tipo_residente, activo) VALUES (?, ?, ?, ?, ?, 1)",
-                    (cedula, nombre, celular, casa, tipo_residente_ui), commit=True)
-                messagebox.showinfo("Éxito", "Residente registrado.");
-            self.clear_resident_fields();
-            self.load_residents()
+                self.execute_query("INSERT INTO propietarios (cedula, nombre, celular, activo) VALUES (?, ?, ?, 1)",
+                                   (cedula, nombre, celular), commit=True);
+                messagebox.showinfo("Éxito", "Propietario registrado.")
+            self.clear_propietario_fields();
+            self.load_propietarios()
         except sqlite3.IntegrityError as e:
-            if "UNIQUE constraint failed: residentes.cedula" in str(e):
+            if "UNIQUE constraint failed: propietarios.cedula" in str(e):
                 messagebox.showerror("Duplicado", f"Cédula '{cedula}' ya existe.")
-            elif "UNIQUE constraint failed: residentes.celular" in str(e):
+            elif "UNIQUE constraint failed: propietarios.celular" in str(e) and celular:
                 messagebox.showerror("Duplicado", f"Celular '{celular}' ya existe.")
             else:
                 messagebox.showerror("Error DB", f"Error: {e}")
         except Exception as e:
             messagebox.showerror("Error", f"Error inesperado: {e}")
 
-    def on_resident_select(self, event=None):
-        selected_item = self.resident_tree.focus();
-        if not selected_item: return
-        values = self.resident_tree.item(selected_item, "values")
+    def on_propietario_select(self, event=None):
+        selected = self.propietario_tree.focus();
+        if not selected: return
+        values = self.propietario_tree.item(selected, "values")
         if values:
-            self.resident_cedula_to_update = values[0];
-            self.resident_cedula_entry.config(state='normal');
-            self.resident_cedula_entry.delete(0, tk.END);
-            self.resident_cedula_entry.insert(0, values[0]);
-            self.resident_cedula_entry.config(state='disabled')
-            self.resident_name_entry.delete(0, tk.END);
-            self.resident_name_entry.insert(0, values[1])
-            self.resident_type_combobox.set(values[2].capitalize())
-            self.resident_phone_entry.delete(0, tk.END);
-            self.resident_phone_entry.insert(0, values[5])
-            self.resident_house_entry.delete(0, tk.END);
-            self.resident_house_entry.insert(0, values[6])
+            self.prop_cedula_to_update = values[0];
+            self.prop_cedula_entry.config(state='normal');
+            self.prop_cedula_entry.delete(0, tk.END);
+            self.prop_cedula_entry.insert(0, values[0]);
+            self.prop_cedula_entry.config(state='disabled')
+            self.prop_nombre_entry.delete(0, tk.END);
+            self.prop_nombre_entry.insert(0, values[1])
+            self.prop_celular_entry.delete(0, tk.END);
+            self.prop_celular_entry.insert(0, values[2] if values[2] else "")
 
-    def load_residents(self):
-        for i in self.resident_tree.get_children(): self.resident_tree.delete(i)
+    def load_propietarios(self):
+        for i in self.propietario_tree.get_children(): self.propietario_tree.delete(i)
         rows = self.execute_query(
-            "SELECT cedula, nombre, tipo_residente, activo, preguntas_consecutivas_sin_votar, celular, casa FROM residentes ORDER BY activo DESC, nombre",
-            fetchall=True)
-        if rows is not None:
-            for row in rows:
-                cedula, nombre, tipo, activo_int, ausencias, celular, casa = row
-                estado_str = "Activo" if activo_int == 1 else "Inactivo"
-                self.resident_tree.insert("", "end", values=(
-                cedula, nombre, tipo.capitalize(), estado_str, ausencias, celular, casa))
-        self.update_resident_comboboxes()
+            "SELECT cedula, nombre, celular, activo FROM propietarios ORDER BY activo DESC, nombre", fetchall=True)
+        if rows:
+            for row in rows: estado = "Activo" if row[3] == 1 else "Inactivo"; self.propietario_tree.insert("", "end",
+                                                                                                            values=(
+                                                                                                            row[0],
+                                                                                                            row[1], row[
+                                                                                                                2] or "",
+                                                                                                            estado))
+        self.update_propietario_comboboxes()
 
-    def update_resident_comboboxes(self):
-        residents_data = self.execute_query(
-            "SELECT cedula, nombre, casa FROM residentes WHERE activo = 1 ORDER BY nombre", fetchall=True)
-        resident_list = [f"{r[0]}: {r[1]} ({r[2]})" for r in residents_data] if residents_data else []
-        if hasattr(self, 'proxy_giver_combobox'): self.proxy_giver_combobox[
-            'values'] = resident_list; self.proxy_giver_combobox.set('')
-        if hasattr(self, 'proxy_receiver_combobox'): self.proxy_receiver_combobox[
-            'values'] = resident_list; self.proxy_receiver_combobox.set('')
+    def update_propietario_comboboxes(self):
+        props = self.execute_query("SELECT cedula, nombre FROM propietarios WHERE activo = 1 ORDER BY nombre",
+                                   fetchall=True)
+        prop_list = [f"{p[0]}: {p[1]}" for p in props] if props else []
+        if hasattr(self, 'unidad_propietario_combo'): self.unidad_propietario_combo[
+            'values'] = prop_list; self.unidad_propietario_combo.set('')
 
-    def toggle_resident_activation(self):
-        selected_item = self.resident_tree.focus()
-        if not selected_item: messagebox.showwarning("Advertencia", "Seleccione residente."); return
-        values = self.resident_tree.item(selected_item, "values");
-        cedula_residente = values[0];
-        nombre_residente = values[1];
-        estado_actual_str = values[3]
-        nuevo_estado_int = 0 if estado_actual_str == "Activo" else 1;
-        accion_str = "desactivar" if nuevo_estado_int == 0 else "activar"
-        reset_ausencias = ", preguntas_consecutivas_sin_votar = 0" if nuevo_estado_int == 1 else ""
-        if messagebox.askyesno(f"Confirmar {accion_str.capitalize()}",
-                               f"¿{accion_str} a '{nombre_residente}' ({cedula_residente})?"):
+    def toggle_propietario_activation(self):
+        selected = self.propietario_tree.focus();
+        if not selected: messagebox.showwarning("Advertencia", "Seleccione propietario."); return
+        values = self.propietario_tree.item(selected, "values");
+        cedula = values[0];
+        nombre = values[1];
+        estado = values[3]
+        nuevo_estado = 0 if estado == "Activo" else 1;
+        accion = "desactivar" if nuevo_estado == 0 else "activar"
+        if messagebox.askyesno(f"Confirmar", f"¿{accion.capitalize()} a '{nombre}' ({cedula})?"):
             try:
-                self.execute_query(f"UPDATE residentes SET activo = ? {reset_ausencias} WHERE cedula=?",
-                                   (nuevo_estado_int, cedula_residente), commit=True)
-                messagebox.showinfo("Éxito", f"Residente '{nombre_residente}' {accion_str}do.")
-                self.load_residents();
-                self.clear_resident_fields()
+                # Al desactivar, desasociar de unidades? Opcional. Por ahora solo desactiva.
+                self.execute_query(f"UPDATE propietarios SET activo = ? WHERE cedula=?", (nuevo_estado, cedula),
+                                   commit=True);
+                messagebox.showinfo("Éxito", f"Propietario {accion}do.");
+                self.load_propietarios();
+                self.clear_propietario_fields()
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo actualizar: {e}")
 
-    # --- Pestaña de Asambleas ---
-    def setup_assembly_tab(self):
-        # (UI sin cambios)
-        frame = self.assembly_tab;
+    # --- Pestaña Unidades ---
+    def setup_unidad_tab(self):
+        frame = self.unidad_tab
+        form_frame = ttk.LabelFrame(frame, text="Registrar/Actualizar Unidad", padding=10);
+        form_frame.pack(padx=10, pady=10, fill="x")
+        ttk.Label(form_frame, text="Nombre Unidad:").grid(row=0, column=0, padx=5, pady=5, sticky="w");
+        self.unidad_nombre_entry = ttk.Entry(form_frame, width=30);
+        self.unidad_nombre_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Label(form_frame, text="Coeficiente:").grid(row=1, column=0, padx=5, pady=5, sticky="w");
+        self.unidad_coef_entry = ttk.Entry(form_frame, width=30);
+        self.unidad_coef_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Label(form_frame, text="Propietario:").grid(row=2, column=0, padx=5, pady=5, sticky="w");
+        self.unidad_propietario_combo = ttk.Combobox(form_frame, state="readonly", width=28);
+        self.unidad_propietario_combo.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+        self.unidad_id_to_update = None
+        button_frame = ttk.Frame(form_frame);
+        button_frame.grid(row=3, column=0, columnspan=2, pady=10)
+        ttk.Button(button_frame, text="Guardar Unidad", command=self.save_unidad).pack(side=tk.LEFT, padx=5);
+        ttk.Button(button_frame, text="Limpiar", command=self.clear_unidad_fields).pack(side=tk.LEFT, padx=5)
+        list_frame = ttk.LabelFrame(frame, text="Lista Unidades", padding=10);
+        list_frame.pack(padx=10, pady=10, fill="both", expand=True)
+        columns = ("id_u", "nombre_u", "coef", "ced_prop", "nom_prop")
+        self.unidad_tree = ttk.Treeview(list_frame, columns=columns, show="headings")
+        self.unidad_tree.heading("id_u", text="ID");
+        self.unidad_tree.column("id_u", width=40, anchor=tk.W)
+        self.unidad_tree.heading("nombre_u", text="Unidad");
+        self.unidad_tree.column("nombre_u", width=100, anchor=tk.W)
+        self.unidad_tree.heading("coef", text="Coef.");
+        self.unidad_tree.column("coef", width=80, anchor=tk.E)
+        self.unidad_tree.heading("ced_prop", text="Cédula Prop.");
+        self.unidad_tree.column("ced_prop", width=120, anchor=tk.W)
+        self.unidad_tree.heading("nom_prop", text="Nombre Prop.");
+        self.unidad_tree.column("nom_prop", width=200, anchor=tk.W)
+        self.unidad_tree.pack(fill="both", expand=True, side=tk.LEFT)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.unidad_tree.yview);
+        self.unidad_tree.configure(yscrollcommand=scrollbar.set);
+        scrollbar.pack(side=tk.RIGHT, fill="y")
+        self.unidad_tree.bind("<<TreeviewSelect>>", self.on_unidad_select)
+        actions_frame = ttk.Frame(list_frame);
+        actions_frame.pack(pady=5, fill="x")
+        ttk.Button(actions_frame, text="Eliminar Unidad", command=self.delete_unidad).pack(side=tk.LEFT, padx=5)
+        ttk.Button(actions_frame, text="Refrescar", command=self.load_unidades).pack(side=tk.LEFT, padx=5)
+
+    def clear_unidad_fields(self):
+        self.unidad_id_to_update = None;
+        self.unidad_nombre_entry.config(state='normal')
+        self.unidad_nombre_entry.delete(0, tk.END);
+        self.unidad_coef_entry.delete(0, tk.END);
+        self.unidad_propietario_combo.set('')
+        self.unidad_nombre_entry.focus()
+
+    def save_unidad(self):
+        nombre_u = self.unidad_nombre_entry.get().strip();
+        coef_str = self.unidad_coef_entry.get().strip();
+        prop_sel = self.unidad_propietario_combo.get()
+        if not nombre_u or not coef_str or not prop_sel: messagebox.showerror("Error",
+                                                                              "Nombre, Coeficiente y Propietario obligatorios."); return
+        try:
+            coef = float(coef_str.replace(',', '.'))
+        except ValueError:
+            messagebox.showerror("Error", "Coeficiente numérico."); return
+        try:
+            ced_prop = prop_sel.split(":")[0].strip()
+        except IndexError:
+            messagebox.showerror("Error", "Seleccione propietario válido."); return
+        try:
+            if self.unidad_id_to_update:
+                self.execute_query("UPDATE unidades SET coeficiente=?, cedula_propietario=? WHERE id_unidad=?",
+                                   (coef, ced_prop, self.unidad_id_to_update), commit=True);
+                messagebox.showinfo("Éxito", "Unidad actualizada.")
+            else:
+                self.execute_query(
+                    "INSERT INTO unidades (nombre_unidad, coeficiente, cedula_propietario) VALUES (?, ?, ?)",
+                    (nombre_u, coef, ced_prop), commit=True);
+                messagebox.showinfo("Éxito", "Unidad registrada.")
+            self.clear_unidad_fields();
+            self.load_unidades()
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Duplicado", f"Nombre unidad '{nombre_u}' ya existe.")
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo guardar: {e}")
+
+    def on_unidad_select(self, event=None):
+        selected = self.unidad_tree.focus();
+        if not selected: return
+        values = self.unidad_tree.item(selected, "values")
+        if values:
+            self.unidad_id_to_update = values[0];
+            self.unidad_nombre_entry.config(state='normal');
+            self.unidad_nombre_entry.delete(0, tk.END);
+            self.unidad_nombre_entry.insert(0, values[1]);
+            self.unidad_nombre_entry.config(state='disabled')
+            self.unidad_coef_entry.delete(0, tk.END);
+            self.unidad_coef_entry.insert(0, values[2])
+            ced_prop = values[3];
+            prop_display = f"{ced_prop}: {values[4]}"
+            if prop_display in self.unidad_propietario_combo['values']:
+                self.unidad_propietario_combo.set(prop_display)
+            else:
+                self.unidad_propietario_combo.set('')
+
+    def load_unidades(self):
+        for i in self.unidad_tree.get_children(): self.unidad_tree.delete(i)
+        query = """SELECT u.id_unidad, u.nombre_unidad, u.coeficiente, u.cedula_propietario, p.nombre 
+                   FROM unidades u LEFT JOIN propietarios p ON u.cedula_propietario = p.cedula 
+                   ORDER BY u.nombre_unidad"""
+        rows = self.execute_query(query, fetchall=True)
+        if rows:
+            for row in rows: self.unidad_tree.insert("", "end", values=row)
+        self.update_unidad_comboboxes()
+
+    def update_unidad_comboboxes(self):
+        unidades = self.execute_query(
+            "SELECT u.id_unidad, u.nombre_unidad, p.nombre FROM unidades u JOIN propietarios p ON u.cedula_propietario = p.cedula WHERE p.activo = 1 ORDER BY u.nombre_unidad",
+            fetchall=True)
+        unidad_list = [f"{u[0]}: {u[1]} (Prop: {u[2]})" for u in unidades] if unidades else []
+        if hasattr(self, 'poder_unidad_combo'): self.poder_unidad_combo[
+            'values'] = unidad_list; self.poder_unidad_combo.set('')
+
+    def delete_unidad(self):
+        selected = self.unidad_tree.focus();
+        if not selected: messagebox.showwarning("Advertencia", "Seleccione unidad."); return
+        values = self.unidad_tree.item(selected, "values")
+        if messagebox.askyesno("Confirmar",
+                               f"¿Eliminar unidad '{values[1]}'? Esto eliminará poderes y votos asociados."):
+            try:
+                # ON DELETE CASCADE debería manejar dependencias si está habilitado
+                self.execute_query("DELETE FROM unidades WHERE id_unidad=?", (values[0],), commit=True);
+                messagebox.showinfo("Éxito", "Unidad eliminada.");
+                self.load_unidades();
+                self.clear_unidad_fields()
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo eliminar: {e}")
+
+    # --- Pestaña Asambleas/Poderes ---
+    def setup_asamblea_tab(self):
+        frame = self.asamblea_tab
         assembly_selection_frame = ttk.LabelFrame(frame, text="Gestión Asamblea", padding=10);
         assembly_selection_frame.pack(padx=10, pady=10, fill="x")
         ttk.Label(assembly_selection_frame, text="Fecha (YYYY-MM-DD):").grid(row=0, column=0, padx=5, pady=5,
@@ -316,24 +493,31 @@ class App:
         self.assembly_combobox.bind("<<ComboboxSelected>>", self.on_assembly_selected)
         powers_frame = ttk.LabelFrame(frame, text="Gestión Poderes", padding=10);
         powers_frame.pack(padx=10, pady=10, fill="x")
-        ttk.Label(powers_frame, text="Da poder:").grid(row=0, column=0, padx=5, pady=5, sticky="w");
-        self.proxy_giver_combobox = ttk.Combobox(powers_frame, state="readonly", width=40);
-        self.proxy_giver_combobox.grid(row=0, column=1, padx=5, pady=5)
-        ttk.Label(powers_frame, text="Recibe poder:").grid(row=1, column=0, padx=5, pady=5, sticky="w");
-        self.proxy_receiver_combobox = ttk.Combobox(powers_frame, state="readonly", width=40);
-        self.proxy_receiver_combobox.grid(row=1, column=1, padx=5, pady=5)
-        ttk.Button(powers_frame, text="Asignar Poder", command=self.assign_proxy).grid(row=2, column=0, columnspan=2,
+        ttk.Label(powers_frame, text="Unidad da poder:").grid(row=0, column=0, padx=5, pady=5, sticky="w");
+        self.poder_unidad_combo = ttk.Combobox(powers_frame, state="readonly", width=40);
+        self.poder_unidad_combo.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Label(powers_frame, text="Cédula Apoderado:").grid(row=1, column=0, padx=5, pady=5, sticky="w");
+        self.poder_cedula_apod_entry = ttk.Entry(powers_frame, width=40);
+        self.poder_cedula_apod_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Label(powers_frame, text="Nombre Apoderado:").grid(row=2, column=0, padx=5, pady=5, sticky="w");
+        self.poder_nombre_apod_entry = ttk.Entry(powers_frame, width=40);
+        self.poder_nombre_apod_entry.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Button(powers_frame, text="Asignar Poder", command=self.assign_proxy).grid(row=3, column=0, columnspan=2,
                                                                                        pady=10)
-        self.powers_tree = ttk.Treeview(powers_frame, columns=("id_poder", "da_poder_cedula", "recibe_poder_cedula"),
+        self.powers_tree = ttk.Treeview(powers_frame, columns=("id_p", "unidad", "propietario", "ced_apod", "nom_apod"),
                                         show="headings", height=4);
-        self.powers_tree.heading("id_poder", text="ID");
-        self.powers_tree.heading("da_poder_cedula", text="Da Poder (Cédula - Nombre)");
-        self.powers_tree.heading("recibe_poder_cedula", text="Recibe Poder (Cédula - Nombre)");
-        self.powers_tree.column("id_poder", width=30, anchor=tk.W);
-        self.powers_tree.column("da_poder_cedula", width=250, anchor=tk.W);
-        self.powers_tree.column("recibe_poder_cedula", width=250, anchor=tk.W);
-        self.powers_tree.grid(row=3, column=0, columnspan=2, pady=5, sticky="ew");
-        ttk.Button(powers_frame, text="Eliminar Poder", command=self.delete_proxy).grid(row=4, column=0, columnspan=2,
+        self.powers_tree.heading("id_p", text="ID");
+        self.powers_tree.column("id_p", width=30);
+        self.powers_tree.heading("unidad", text="Unidad");
+        self.powers_tree.column("unidad", width=100);
+        self.powers_tree.heading("propietario", text="Propietario");
+        self.powers_tree.column("propietario", width=150);
+        self.powers_tree.heading("ced_apod", text="Céd. Apod.");
+        self.powers_tree.column("ced_apod", width=100);
+        self.powers_tree.heading("nom_apod", text="Nom. Apod.");
+        self.powers_tree.column("nom_apod", width=150);
+        self.powers_tree.grid(row=4, column=0, columnspan=2, pady=5, sticky="ew");
+        ttk.Button(powers_frame, text="Eliminar Poder", command=self.delete_proxy).grid(row=5, column=0, columnspan=2,
                                                                                         pady=5)
         questions_frame = ttk.LabelFrame(frame, text="Preguntas Asamblea", padding=10);
         questions_frame.pack(padx=10, pady=10, fill="both", expand=True)
@@ -372,8 +556,145 @@ class App:
         q_scrollbar.pack(side=tk.RIGHT, fill="y")
         self.questions_tree.bind("<<TreeviewSelect>>", self.on_question_select)
 
+    # --- Definición de create_assembly (Añadida) ---
+    def create_assembly(self):
+        fecha = self.assembly_date_entry.get();
+        descripcion = self.assembly_desc_entry.get()
+        if not fecha or not descripcion: messagebox.showerror("Error", "Fecha y descripción obligatorias."); return
+        try:
+            self.execute_query("INSERT INTO asambleas (fecha, descripcion) VALUES (?, ?)", (fecha, descripcion),
+                               commit=True); messagebox.showinfo("Éxito",
+                                                                 "Asamblea creada."); self.load_asambleas(); self.assembly_date_entry.delete(
+                0, tk.END); self.assembly_desc_entry.delete(0, tk.END)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo crear asamblea: {e}")
+
+    def load_asambleas(self):
+        assemblies = self.execute_query("SELECT id, fecha, descripcion FROM asambleas ORDER BY fecha DESC, id DESC",
+                                        fetchall=True)
+        if assemblies is not None:
+            # Cargar también en el combo de asistencia
+            assembly_list_display = [f"{row[0]}: {row[1]} - {row[2]}" for row in assemblies]
+            self.assembly_combobox['values'] = assembly_list_display
+            if hasattr(self, 'asistencia_asamblea_combo'):
+                self.asistencia_asamblea_combo['values'] = assembly_list_display
+
+            if assemblies:
+                self.assembly_combobox.current(0);
+                if hasattr(self, 'asistencia_asamblea_combo'): self.asistencia_asamblea_combo.current(0)
+                self.on_assembly_selected()  # Carga detalles para la asamblea seleccionada
+                self.load_asistencia_for_assembly()  # Carga asistencia para la asamblea seleccionada
+            else:
+                self.assembly_combobox.set('');
+                if hasattr(self, 'asistencia_asamblea_combo'): self.asistencia_asamblea_combo.set('')
+                self.current_assembly_id = None;
+                self.clear_assembly_details()
+        else:
+            self.assembly_combobox['values'] = [];
+            self.assembly_combobox.set('');
+            if hasattr(self, 'asistencia_asamblea_combo'): self.asistencia_asamblea_combo[
+                'values'] = []; self.asistencia_asamblea_combo.set('')
+            self.current_assembly_id = None;
+            self.clear_assembly_details()
+
+    def clear_assembly_details(self):
+        # Limpiar campos de la pestaña Asambleas/Poderes
+        if hasattr(self, 'poder_unidad_combo'): self.poder_unidad_combo.set('')
+        if hasattr(self, 'poder_cedula_apod_entry'): self.poder_cedula_apod_entry.delete(0, tk.END)
+        if hasattr(self, 'poder_nombre_apod_entry'): self.poder_nombre_apod_entry.delete(0, tk.END)
+        if hasattr(self, 'powers_tree'):
+            for i in self.powers_tree.get_children(): self.powers_tree.delete(i)
+        if hasattr(self, 'question_text_entry'): self.question_text_entry.delete(0, tk.END)
+        if hasattr(self, 'question_options_entry'):
+            self.question_options_entry.delete(0, tk.END);
+            self.question_options_entry.insert(0, "Acepta,No Acepta,En Blanco")
+        if hasattr(self, 'questions_tree'):
+            for i in self.questions_tree.get_children(): self.questions_tree.delete(i)
+        self.editing_question_id = None  # Resetear ID de pregunta en edición
+        # Limpiar también la pestaña de votación
+        self.clear_voting_area()
+
+    def on_assembly_selected(self, event=None):
+        selection = self.assembly_combobox.get()
+        if selection:
+            try:
+                new_assembly_id = int(selection.split(":")[0])
+                if new_assembly_id != self.current_assembly_id:  # Solo recargar si cambia
+                    self.current_assembly_id = new_assembly_id
+                    self.load_selected_assembly_details()
+                    # Actualizar selección en la pestaña de asistencia
+                    if hasattr(self, 'asistencia_asamblea_combo'):
+                        self.asistencia_asamblea_combo.set(selection)
+                        self.load_asistencia_for_assembly()
+
+            except ValueError:
+                messagebox.showerror("Error",
+                                     "Selección inválida."); self.current_assembly_id = None; self.clear_assembly_details()
+        else:
+            self.current_assembly_id = None; self.clear_assembly_details()
+
+    def load_selected_assembly_details(self):
+        if not self.current_assembly_id: self.clear_assembly_details(); return
+        # Resetear contadores de inasistencia al cambiar de asamblea (ya no aplica aquí, se hace al cerrar pregunta)
+        # self.execute_query("UPDATE residentes SET preguntas_consecutivas_sin_votar = 0 WHERE ultima_asamblea_actividad != ? OR ultima_asamblea_actividad IS NULL", (self.current_assembly_id,), commit=True)
+        self.update_propietario_comboboxes();
+        self.update_unidad_comboboxes();  # Cargar unidades para poderes
+        self.load_proxies_for_assembly();
+        self.load_questions_for_assembly();
+        self.load_questions_for_voting_tab()
+
+    def assign_proxy(self):
+        if not self.current_assembly_id: messagebox.showerror("Error", "Seleccione asamblea."); return
+        unidad_selection = self.poder_unidad_combo.get();
+        cedula_apoderado = self.poder_cedula_apod_entry.get().strip();
+        nombre_apoderado = self.poder_nombre_apod_entry.get().strip()
+        if not unidad_selection or not cedula_apoderado or not nombre_apoderado: messagebox.showerror("Error",
+                                                                                                      "Seleccione Unidad y complete datos Apoderado."); return
+        try:
+            id_unidad = int(unidad_selection.split(":")[0].strip())
+        except (ValueError, IndexError):
+            messagebox.showerror("Error", "Selección unidad inválida."); return
+        propietario_unidad = self.execute_query("SELECT cedula_propietario FROM unidades WHERE id_unidad = ?",
+                                                (id_unidad,), fetchone=True)
+        if propietario_unidad and propietario_unidad[0] == cedula_apoderado: messagebox.showerror("Error",
+                                                                                                  "Propietario no puede ser apoderado de su unidad."); return
+        try:
+            self.execute_query(
+                "INSERT INTO poderes (asamblea_id, id_unidad_da_poder, cedula_apoderado, nombre_apoderado) VALUES (?, ?, ?, ?)",
+                (self.current_assembly_id, id_unidad, cedula_apoderado, nombre_apoderado), commit=True)
+            messagebox.showinfo("Éxito", "Poder asignado.");
+            self.load_proxies_for_assembly();
+            self.poder_cedula_apod_entry.delete(0, tk.END);
+            self.poder_nombre_apod_entry.delete(0, tk.END);
+            self.poder_unidad_combo.set('')
+        except sqlite3.IntegrityError:
+            messagebox.showerror("Error", "Ya existe poder para esta unidad en esta asamblea.");
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo asignar: {e}")
+
+    def load_proxies_for_assembly(self):
+        for i in self.powers_tree.get_children(): self.powers_tree.delete(i)
+        if not self.current_assembly_id: return
+        query = """SELECT p.id, u.nombre_unidad, pr.nombre, p.cedula_apoderado, p.nombre_apoderado FROM poderes p JOIN unidades u ON p.id_unidad_da_poder = u.id_unidad JOIN propietarios pr ON u.cedula_propietario = pr.cedula WHERE p.asamblea_id = ? ORDER BY u.nombre_unidad"""
+        proxies = self.execute_query(query, (self.current_assembly_id,), fetchall=True)
+        if proxies:
+            for id_p, nom_u, nom_prop, ced_apod, nom_apod in proxies: self.powers_tree.insert("", "end", values=(
+            id_p, nom_u, nom_prop, ced_apod, nom_apod))
+
+    def delete_proxy(self):
+        selected = self.powers_tree.focus();
+        if not selected: messagebox.showwarning("Advertencia", "Seleccione poder."); return
+        if not self.current_assembly_id: messagebox.showerror("Error", "No hay asamblea."); return
+        if messagebox.askyesno("Confirmar", "¿Eliminar poder?"):
+            power_id = self.powers_tree.item(selected, "values")[0]
+            try:
+                self.execute_query("DELETE FROM poderes WHERE id=? AND asamblea_id=?",
+                                   (power_id, self.current_assembly_id), commit=True); messagebox.showinfo("Éxito",
+                                                                                                           "Poder eliminado."); self.load_proxies_for_assembly();
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo eliminar: {e}")
+
     def save_question(self):
-        # (Sin cambios)
         if not self.current_assembly_id: messagebox.showerror("Error", "Seleccione asamblea."); return
         q_text = self.question_text_entry.get().strip();
         q_options = self.question_options_entry.get().strip()
@@ -405,17 +726,16 @@ class App:
                 messagebox.showerror("Error", f"No se pudo agregar: {e}")
 
     def clear_question_fields(self):
-        # (Sin cambios)
         self.editing_question_id = None;
         self.question_text_entry.config(state='normal');
         self.question_options_entry.config(state='normal')
         self.question_text_entry.delete(0, tk.END);
         self.question_options_entry.delete(0, tk.END);
         self.question_options_entry.insert(0, "Acepta,No Acepta,En Blanco")
-        if self.questions_tree.focus(): self.questions_tree.selection_remove(self.questions_tree.focus())
+        if hasattr(self, 'questions_tree') and self.questions_tree.focus(): self.questions_tree.selection_remove(
+            self.questions_tree.focus())
 
     def on_question_select(self, event=None):
-        # (Sin cambios)
         selected_item = self.questions_tree.focus()
         if not selected_item: self.clear_question_fields(); return
         values = self.questions_tree.item(selected_item, "values")
@@ -435,146 +755,187 @@ class App:
                 self.question_text_entry.config(state='normal'); self.question_options_entry.config(state='normal')
 
     def load_questions_for_assembly(self):
-        # (Sin cambios)
-        for i in self.questions_tree.get_children(): self.questions_tree.delete(i)
+        if hasattr(self, 'questions_tree'):
+            for i in self.questions_tree.get_children(): self.questions_tree.delete(i)
         if not self.current_assembly_id: return
         questions_data = self.execute_query(
             "SELECT id, texto_pregunta, opciones_configuradas, estado FROM preguntas WHERE asamblea_id = ? ORDER BY id",
             (self.current_assembly_id,), fetchall=True)
         if questions_data:
-            for q_id, q_text, q_opts, q_estado in questions_data: self.questions_tree.insert("", "end", values=(
-            q_id, q_text, q_opts, q_estado.capitalize()))
+            for q_id, q_text, q_opts, q_estado in questions_data:
+                if hasattr(self, 'questions_tree'): self.questions_tree.insert("", "end", values=(
+                q_id, q_text, q_opts, q_estado.capitalize()))
 
-    def create_assembly(self):
-        # (Sin cambios)
-        fecha = self.assembly_date_entry.get();
-        descripcion = self.assembly_desc_entry.get()
-        if not fecha or not descripcion: messagebox.showerror("Error", "Fecha y descripción obligatorias."); return
-        try:
-            self.execute_query("INSERT INTO asambleas (fecha, descripcion) VALUES (?, ?)", (fecha, descripcion),
-                               commit=True); messagebox.showinfo("Éxito",
-                                                                 "Asamblea creada."); self.load_assemblies(); self.assembly_date_entry.delete(
-                0, tk.END); self.assembly_desc_entry.delete(0, tk.END)
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo crear asamblea: {e}")
+    # --- Pestaña Asistencia ---
+    def setup_asistencia_tab(self):
+        frame = self.asistencia_tab
+        asamblea_select_frame = ttk.LabelFrame(frame, text="Seleccionar Asamblea", padding=10);
+        asamblea_select_frame.pack(padx=10, pady=10, fill="x")
+        ttk.Label(asamblea_select_frame, text="Asamblea:").pack(side=tk.LEFT, padx=5);
+        self.asistencia_asamblea_combo = ttk.Combobox(asamblea_select_frame, state="readonly", width=60);
+        self.asistencia_asamblea_combo.pack(side=tk.LEFT, padx=5);
+        self.asistencia_asamblea_combo.bind("<<ComboboxSelected>>", self.load_asistencia_for_assembly);
+        ttk.Button(asamblea_select_frame, text="Cargar", command=self.load_asistencia_for_assembly).pack(side=tk.LEFT,
+                                                                                                         padx=5)
+        list_frame = ttk.LabelFrame(frame, text="Registro de Asistencia", padding=10);
+        list_frame.pack(padx=10, pady=10, fill="both", expand=True)
+        columns = ("cedula", "nombre", "tipo", "presente");
+        self.asistencia_tree = ttk.Treeview(list_frame, columns=columns, show="headings");
+        self.asistencia_tree.heading("cedula", text="Cédula");
+        self.asistencia_tree.column("cedula", width=120);
+        self.asistencia_tree.heading("nombre", text="Nombre");
+        self.asistencia_tree.column("nombre", width=250);
+        self.asistencia_tree.heading("tipo", text="Tipo");
+        self.asistencia_tree.column("tipo", width=100);
+        self.asistencia_tree.heading("presente", text="Presente");
+        self.asistencia_tree.column("presente", width=80, anchor=tk.CENTER);
+        self.asistencia_tree.pack(side=tk.LEFT, fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.asistencia_tree.yview);
+        self.asistencia_tree.configure(yscrollcommand=scrollbar.set);
+        scrollbar.pack(side=tk.RIGHT, fill="y")
+        self.asistencia_tree.bind("<Button-1>", self.toggle_asistencia_on_click)
+        add_apod_frame = ttk.LabelFrame(frame, text="Añadir Apoderado a Lista", padding=10);
+        add_apod_frame.pack(padx=10, pady=10, fill="x")
+        ttk.Label(add_apod_frame, text="Cédula Apod.:").grid(row=0, column=0, padx=5, pady=2, sticky="w");
+        self.asistencia_apod_cedula_entry = ttk.Entry(add_apod_frame, width=20);
+        self.asistencia_apod_cedula_entry.grid(row=0, column=1, padx=5, pady=2)
+        ttk.Label(add_apod_frame, text="Nombre Apod.:").grid(row=0, column=2, padx=5, pady=2, sticky="w");
+        self.asistencia_apod_nombre_entry = ttk.Entry(add_apod_frame, width=30);
+        self.asistencia_apod_nombre_entry.grid(row=0, column=3, padx=5, pady=2, sticky="ew")
+        ttk.Button(add_apod_frame, text="Añadir", command=self.add_apoderado_to_asistencia).grid(row=0, column=4,
+                                                                                                 padx=10, pady=2);
+        add_apod_frame.grid_columnconfigure(3, weight=1)
+        save_button_frame = ttk.Frame(frame);
+        save_button_frame.pack(pady=10);
+        ttk.Button(save_button_frame, text="Guardar Cambios Asistencia", command=self.save_asistencia_changes).pack()
 
-    def load_assemblies(self):
-        # (Sin cambios)
+    def load_asambleas_for_asistencia(self):
         assemblies = self.execute_query("SELECT id, fecha, descripcion FROM asambleas ORDER BY fecha DESC, id DESC",
                                         fetchall=True)
         if assemblies is not None:
-            self.assembly_combobox['values'] = [f"{row[0]}: {row[1]} - {row[2]}" for row in assemblies]
+            self.asistencia_asamblea_combo['values'] = [f"{row[0]}: {row[1]} - {row[2]}" for row in assemblies]
             if assemblies:
-                self.assembly_combobox.current(0); self.on_assembly_selected()
+                self.asistencia_asamblea_combo.current(0); self.load_asistencia_for_assembly()
             else:
-                self.assembly_combobox.set(''); self.current_assembly_id = None; self.clear_assembly_details()
+                self.asistencia_asamblea_combo.set(''); self.clear_asistencia_list()
         else:
-            self.assembly_combobox['values'] = []; self.assembly_combobox.set(
-                ''); self.current_assembly_id = None; self.clear_assembly_details()
+            self.asistencia_asamblea_combo['values'] = []; self.asistencia_asamblea_combo.set(
+                ''); self.clear_asistencia_list()
 
-    def clear_assembly_details(self):
-        # (Sin cambios)
-        if hasattr(self, 'proxy_giver_combobox'): self.proxy_giver_combobox.set('')
-        if hasattr(self, 'proxy_receiver_combobox'): self.proxy_receiver_combobox.set('')
-        if hasattr(self, 'powers_tree'):
-            for i in self.powers_tree.get_children(): self.powers_tree.delete(i)
-        if hasattr(self, 'question_text_entry'): self.question_text_entry.delete(0, tk.END)
-        if hasattr(self, 'question_options_entry'):
-            self.question_options_entry.delete(0, tk.END);
-            self.question_options_entry.insert(0, "Acepta,No Acepta,En Blanco")
-        if hasattr(self, 'questions_tree'):
-            for i in self.questions_tree.get_children(): self.questions_tree.delete(i)
-        self.clear_voting_area()
+    def clear_asistencia_list(self):
+        if hasattr(self, 'asistencia_tree'):
+            for i in self.asistencia_tree.get_children(): self.asistencia_tree.delete(i)
+        self.asistencia_data = {}
 
-    def on_assembly_selected(self, event=None):
-        # (Sin cambios)
-        selection = self.assembly_combobox.get()
-        if selection:
-            try:
-                self.current_assembly_id = int(selection.split(":")[0]); self.load_selected_assembly_details()
-            except ValueError:
-                messagebox.showerror("Error",
-                                     "Selección inválida."); self.current_assembly_id = None; self.clear_assembly_details()
-        else:
-            self.current_assembly_id = None; self.clear_assembly_details()
-
-    def load_selected_assembly_details(self):
-        # (Sin cambios)
-        if not self.current_assembly_id: self.clear_assembly_details(); return
-        self.execute_query(
-            "UPDATE residentes SET preguntas_consecutivas_sin_votar = 0 WHERE ultima_asamblea_actividad != ? OR ultima_asamblea_actividad IS NULL",
-            (self.current_assembly_id,), commit=True)
-        self.update_resident_comboboxes();
-        self.load_proxies_for_assembly();
-        self.load_questions_for_assembly();
-        self.load_questions_for_voting_tab()
-
-    def assign_proxy(self):
-        """Asigna poder, verificando que quien da poder sea Representante."""
-        if not self.current_assembly_id: messagebox.showerror("Error", "Seleccione asamblea."); return
-        giver_selection = self.proxy_giver_combobox.get();
-        receiver_selection = self.proxy_receiver_combobox.get()
-        if not giver_selection or not receiver_selection: messagebox.showerror("Error",
-                                                                               "Seleccione ambos residentes."); return
-
+    def load_asistencia_for_assembly(self, event=None):
+        self.clear_asistencia_list()
+        selection = self.asistencia_asamblea_combo.get()
+        if not selection: return
         try:
-            cedula_da_poder = giver_selection.split(":")[0].strip()
-            cedula_recibe_poder = receiver_selection.split(":")[0].strip()
+            asamblea_id = int(selection.split(":")[0])
+        except (ValueError, IndexError):
+            messagebox.showerror("Error", "Selección inválida."); return
 
-            if cedula_da_poder == cedula_recibe_poder: messagebox.showerror("Error",
-                                                                            "No puede darse poder a sí mismo."); return
+        propietarios = self.execute_query("SELECT cedula, nombre FROM propietarios WHERE activo = 1 ORDER BY nombre",
+                                          fetchall=True)
+        apoderados_poder = self.execute_query(
+            "SELECT DISTINCT cedula_apoderado, nombre_apoderado FROM poderes WHERE asamblea_id = ?", (asamblea_id,),
+            fetchall=True)
+        asistencia_existente = self.execute_query(
+            "SELECT cedula_asistente, presente FROM asistencia WHERE asamblea_id = ?", (asamblea_id,), fetchall=True)
+        asistencia_map = {row[0]: row[1] for row in asistencia_existente} if asistencia_existente else {}
+        self.asistencia_data = {}
 
-            # --- NUEVA VERIFICACIÓN: Solo Representantes dan poder ---
-            giver_info = self.execute_query("SELECT tipo_residente FROM residentes WHERE cedula = ? AND activo = 1",
-                                            (cedula_da_poder,), fetchone=True)
-            if not giver_info:
-                messagebox.showerror("Error", f"Residente '{giver_selection}' no encontrado o inactivo.");
-                return
-            if giver_info[0] != TIPO_RESIDENTE_REPRESENTANTE:
-                messagebox.showerror("Error de Poder",
-                                     f"'{giver_selection.split(':')[1].strip()}' es '{giver_info[0].capitalize()}' y no puede dar poder. Solo los representantes pueden.")
-                return
-            # --- FIN VERIFICACIÓN ---
+        if propietarios:
+            for cedula, nombre in propietarios:
+                presente_db = asistencia_map.get(cedula, 0);
+                presente_str = "Sí" if presente_db == 1 else "No"
+                item_id = self.asistencia_tree.insert("", "end",
+                                                      values=(cedula, nombre, TIPO_ASISTENTE_PROPIETARIO, presente_str))
+                self.asistencia_data[item_id] = {'cedula': cedula, 'presente': presente_db,
+                                                 'tipo': TIPO_ASISTENTE_PROPIETARIO, 'nombre': nombre}
+        apoderados_added = set()
+        if apoderados_poder:
+            for cedula_apod, nombre_apod in apoderados_poder:
+                if cedula_apod not in apoderados_added:
+                    presente_db = asistencia_map.get(cedula_apod, 0);
+                    presente_str = "Sí" if presente_db == 1 else "No"
+                    item_id = self.asistencia_tree.insert("", "end", values=(
+                    cedula_apod, nombre_apod, TIPO_ASISTENTE_APODERADO, presente_str))
+                    self.asistencia_data[item_id] = {'cedula': cedula_apod, 'presente': presente_db,
+                                                     'tipo': TIPO_ASISTENTE_APODERADO, 'nombre': nombre_apod}
+                    apoderados_added.add(cedula_apod)
+        if asistencia_existente:
+            for cedula_asist, presente_db in asistencia_map.items():
+                is_propietario = any(p[0] == cedula_asist for p in propietarios or [])
+                if not is_propietario and cedula_asist not in apoderados_added:
+                    asist_info = self.execute_query(
+                        "SELECT nombre_asistente FROM asistencia WHERE asamblea_id = ? AND cedula_asistente = ?",
+                        (asamblea_id, cedula_asist), fetchone=True)
+                    nombre_asist = asist_info[0] if asist_info else "Desconocido";
+                    presente_str = "Sí" if presente_db == 1 else "No"
+                    item_id = self.asistencia_tree.insert("", "end", values=(
+                    cedula_asist, nombre_asist, TIPO_ASISTENTE_APODERADO, presente_str))
+                    self.asistencia_data[item_id] = {'cedula': cedula_asist, 'presente': presente_db,
+                                                     'tipo': TIPO_ASISTENTE_APODERADO, 'nombre': nombre_asist}
+                    apoderados_added.add(cedula_asist)
 
-            self.execute_query(
-                "INSERT INTO poderes (asamblea_id, cedula_da_poder, cedula_recibe_poder) VALUES (?, ?, ?)",
-                (self.current_assembly_id, cedula_da_poder, cedula_recibe_poder), commit=True)
-            messagebox.showinfo("Éxito", "Poder asignado.");
-            self.load_proxies_for_assembly();
-            if self.current_question_id: self.load_eligible_voters()  # Actualizar lista de votantes
-        except sqlite3.IntegrityError:
-            messagebox.showerror("Error", "Este residente ya otorgó poder en esta asamblea.");
-        except ValueError:
-            messagebox.showerror("Error", "Selección inválida.");
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo asignar: {e}")
+    def toggle_asistencia_on_click(self, event):
+        region = self.asistencia_tree.identify_region(event.x, event.y)
+        if region != "cell": return
+        item_id = self.asistencia_tree.focus()
+        if not item_id: return
+        if item_id in self.asistencia_data:
+            current_state = self.asistencia_data[item_id]['presente'];
+            new_state = 1 - current_state
+            self.asistencia_data[item_id]['presente'] = new_state
+            presente_str = "Sí" if new_state == 1 else "No"
+            current_values = list(self.asistencia_tree.item(item_id, 'values'));
+            current_values[3] = presente_str
+            self.asistencia_tree.item(item_id, values=tuple(current_values))
 
-    def load_proxies_for_assembly(self):
-        # (Sin cambios)
-        for i in self.powers_tree.get_children(): self.powers_tree.delete(i)
-        if not self.current_assembly_id: return
-        query = """SELECT p.id, r1.cedula || ': ' || r1.nombre, r2.cedula || ': ' || r2.nombre FROM poderes p JOIN residentes r1 ON p.cedula_da_poder = r1.cedula JOIN residentes r2 ON p.cedula_recibe_poder = r2.cedula WHERE p.asamblea_id = ? AND r1.activo = 1 AND r2.activo = 1"""
-        proxies = self.execute_query(query, (self.current_assembly_id,), fetchall=True)
-        if proxies:
-            for p_data in proxies: self.powers_tree.insert("", "end", values=p_data)
+    def add_apoderado_to_asistencia(self):
+        cedula_apod = self.asistencia_apod_cedula_entry.get().strip();
+        nombre_apod = self.asistencia_apod_nombre_entry.get().strip()
+        if not cedula_apod or not nombre_apod: messagebox.showerror("Error", "Ingrese Cédula y Nombre."); return
+        if any(data['cedula'] == cedula_apod for data in self.asistencia_data.values()): messagebox.showwarning(
+            "Advertencia", "Cédula ya en lista."); return
+        presente_str = "Sí";
+        presente_int = 1
+        item_id = self.asistencia_tree.insert("", "end",
+                                              values=(cedula_apod, nombre_apod, TIPO_ASISTENTE_APODERADO, presente_str))
+        self.asistencia_data[item_id] = {'cedula': cedula_apod, 'presente': presente_int,
+                                         'tipo': TIPO_ASISTENTE_APODERADO, 'nombre': nombre_apod}
+        self.asistencia_apod_cedula_entry.delete(0, tk.END);
+        self.asistencia_apod_nombre_entry.delete(0, tk.END)
 
-    def delete_proxy(self):
-        # (Sin cambios)
-        selected_item = self.powers_tree.focus();
-        if not selected_item: messagebox.showwarning("Advertencia", "Seleccione poder."); return
-        if not self.current_assembly_id: messagebox.showerror("Error", "No hay asamblea."); return
-        if messagebox.askyesno("Confirmar", "¿Eliminar poder?"):
-            power_id = self.powers_tree.item(selected_item, "values")[0]
-            try:
-                self.execute_query("DELETE FROM poderes WHERE id=? AND asamblea_id=?",
-                                   (power_id, self.current_assembly_id), commit=True); messagebox.showinfo("Éxito",
-                                                                                                           "Poder eliminado."); self.load_proxies_for_assembly();
-            except Exception as e:
-                messagebox.showerror("Error", f"No se pudo eliminar: {e}")
+    def save_asistencia_changes(self):
+        selection = self.asistencia_asamblea_combo.get()
+        if not selection: messagebox.showerror("Error", "Seleccione asamblea."); return
+        try:
+            asamblea_id = int(selection.split(":")[0])
+        except (ValueError, IndexError):
+            messagebox.showerror("Error", "Selección inválida."); return
+        if not self.asistencia_data: messagebox.showinfo("Info", "No hay datos para guardar."); return
+        data_to_save = [(asamblea_id, data['cedula'], data['nombre'], data['tipo'], data['presente']) for data in
+                        self.asistencia_data.values()]
+        conn = sqlite3.connect(DB_NAME);
+        cursor = conn.cursor()
+        try:
+            cursor.executemany(
+                "INSERT OR REPLACE INTO asistencia (asamblea_id, cedula_asistente, nombre_asistente, tipo_asistente, presente) VALUES (?, ?, ?, ?, ?)",
+                data_to_save)
+            conn.commit();
+            messagebox.showinfo("Éxito", f"Asistencia para asamblea {asamblea_id} guardada.")
+        except sqlite3.Error as e:
+            conn.rollback(); messagebox.showerror("Error DB", f"No se pudo guardar: {e}")
+        finally:
+            conn.close()
+        self.load_asistencia_for_assembly()
 
-    # --- Pestaña de Votación ---
-    # (setup_voting_tab, load_questions_for_voting_tab, clear_voting_area, on_voting_question_selected_for_display, update_vote_options_ui, activate_question_for_voting sin cambios)
+    # --- Pestaña Votación (Lógica interna AÚN PENDIENTE de refactorización mayor) ---
     def setup_voting_tab(self):
+        # (UI sin cambios por ahora)
         frame = self.voting_tab;
         question_select_frame = ttk.LabelFrame(frame, text="Seleccionar Pregunta", padding=10);
         question_select_frame.pack(padx=10, pady=10, fill="x")
@@ -608,6 +969,7 @@ class App:
         self.results_canvas_widget = None
 
     def load_questions_for_voting_tab(self):
+        # (Sin cambios)
         if not self.current_assembly_id: self.voting_question_combobox[
             'values'] = []; self.voting_question_combobox.set(''); self.clear_voting_area(); return
         questions = self.execute_query("SELECT id, texto_pregunta FROM preguntas WHERE asamblea_id = ? ORDER BY id",
@@ -623,6 +985,7 @@ class App:
                 ''); self.clear_voting_area()
 
     def clear_voting_area(self):
+        # (Sin cambios)
         self.current_question_id = None;
         self.current_question_options = []
         if hasattr(self, 'active_question_label'): self.active_question_label.config(text="Pregunta Activa: Ninguna")
@@ -638,6 +1001,7 @@ class App:
                 if widget != self.results_canvas_widget: widget.destroy()
 
     def on_voting_question_selected_for_display(self, event=None):
+        # (Sin cambios)
         selection = self.voting_question_combobox.get()
         if selection:
             try:
@@ -651,6 +1015,7 @@ class App:
                 messagebox.showerror("Error", "Selección inválida.")
 
     def update_vote_options_ui(self, question_id, for_display_only=False):
+        # (Sin cambios)
         if hasattr(self, 'options_radio_frame') and self.options_radio_frame.winfo_exists():
             for widget in self.options_radio_frame.winfo_children(): widget.destroy()
         self.current_question_options = []
@@ -671,6 +1036,13 @@ class App:
                 ttk.Label(self.options_radio_frame, text="Opciones se mostrarán al activar.").pack(anchor=tk.W)
 
     def activate_question_for_voting(self):
+        # --- NECESITA REFACTORIZACIÓN COMPLETA ---
+        # 1. Obtener elegibles presentes (propietarios/apoderados)
+        # 2. Insertar un voto 'No Votó' para CADA unidad representada por los elegibles presentes
+        # 3. Marcar pregunta como activa
+        # 4. Cargar UI (combo votantes, radios, gráfico inicial)
+        messagebox.showinfo("Pendiente", "La lógica para activar votación con 'No Votó' inicial está pendiente.")
+        # Código temporal para mantener flujo básico:
         selection = self.voting_question_combobox.get();
         if not selection: messagebox.showerror("Error", "Seleccione pregunta."); return
         if not self.current_assembly_id: messagebox.showerror("Error", "Seleccione asamblea."); return
@@ -681,8 +1053,9 @@ class App:
         q_info = self.execute_query("SELECT estado FROM preguntas WHERE id = ?", (new_active_question_id,),
                                     fetchone=True)
         if not q_info: messagebox.showerror("Error", "Pregunta no encontrada."); return
-        if q_info[0] != ESTADO_PREGUNTA_INACTIVA: messagebox.showwarning("Advertencia",
-                                                                         f"Pregunta ya está '{q_info[0].capitalize()}'."); return
+        if q_info[0] == ESTADO_PREGUNTA_CERRADA: messagebox.showwarning("Advertencia",
+                                                                        "Pregunta ya está cerrada."); return
+        if q_info[0] == ESTADO_PREGUNTA_ACTIVA: messagebox.showinfo("Info", "Pregunta ya está activa."); return
         if self.current_question_id is not None and self.current_question_id != new_active_question_id:
             self.execute_query("UPDATE preguntas SET estado = ? WHERE id = ? AND asamblea_id = ?",
                                (ESTADO_PREGUNTA_CERRADA, self.current_question_id, self.current_assembly_id),
@@ -693,22 +1066,24 @@ class App:
         question_text = selection.split(":", 1)[1].strip()
         self.active_question_label.config(text=f"Pregunta Activa (ID: {self.current_question_id}): {question_text}")
         self.update_vote_options_ui(self.current_question_id, for_display_only=False);
-        self.load_eligible_voters();
-        self.display_vote_results_for_question(self.current_question_id);
+        self.load_eligible_voters_for_voting();  # Cargar combo
+        self.display_vote_results_for_question(self.current_question_id);  # Mostrar gráfico (aún sin 'No Votó' inicial)
         self.load_questions_for_assembly()
-        messagebox.showinfo("Votación Activada", f"Pregunta '{question_text}' activa.")
+        messagebox.showinfo("Votación Activada", f"Pregunta '{question_text}' activa (Lógica 'No Votó' pendiente).")
 
     def close_current_question_voting(self):
-        # (Sin cambios)
+        # --- NECESITA REFACTORIZACIÓN ---
+        # 1. Obtener elegibles presentes que NO emitieron un voto diferente a 'No Votó'
+        # 2. Confirmar que su voto quede como 'No Votó' (ya debería estar si se inicializó bien)
+        # 3. Marcar pregunta como cerrada
+        # 4. Mostrar resultados finales
+        messagebox.showinfo("Pendiente", "La lógica para cerrar votación registrando 'No Votó' está pendiente.")
+        # Código temporal para mantener flujo básico:
         if not self.current_question_id: messagebox.showwarning("Advertencia", "Ninguna pregunta activa."); return
         question_id_to_close = self.current_question_id
         q_info = self.execute_query("SELECT texto_pregunta FROM preguntas WHERE id = ?", (question_id_to_close,),
                                     fetchone=True);
         question_text_closed = q_info[0] if q_info else f"ID {question_id_to_close}"
-        deactivated_residents = self.check_and_deactivate_non_voters(question_id_to_close)
-        if deactivated_residents: messagebox.showinfo("Residentes Desactivados",
-                                                      f"Desactivados por {LIMITE_INASISTENCIAS_VOTO} ausencias:\n- " + "\n- ".join(
-                                                          deactivated_residents)); self.load_residents()
         self.execute_query("UPDATE preguntas SET estado = ? WHERE id = ?",
                            (ESTADO_PREGUNTA_CERRADA, question_id_to_close,), commit=True);
         self.load_questions_for_assembly()
@@ -723,153 +1098,97 @@ class App:
         if hasattr(self, 'options_radio_frame') and self.options_radio_frame.winfo_exists():
             for widget in self.options_radio_frame.winfo_children(): widget.destroy()
 
-    def check_and_deactivate_non_voters(self, closed_question_id):
-        # (Sin cambios)
+    def _get_eligible_voters_info(self):
+        # (Lógica sin cambios, ya considera asistencia y poderes)
         if not self.current_assembly_id: return []
-        eligible_cedulas = self._get_eligible_voter_cedulas()
-        if not eligible_cedulas: return []
-        voters_cedulas = {row[0] for row in self.execute_query("SELECT cedula_votante FROM votos WHERE pregunta_id = ?",
-                                                               (closed_question_id,), fetchall=True) or []}
-        resident_inactivity_data = self.execute_query(
-            f"SELECT cedula, preguntas_consecutivas_sin_votar, ultima_asamblea_actividad FROM residentes WHERE cedula IN ({','.join('?' * len(eligible_cedulas))})",
-            list(eligible_cedulas), fetchall=True)
-        if not resident_inactivity_data: return []
-        inactivity_map = {row[0]: {'count': row[1], 'last_assembly': row[2]} for row in resident_inactivity_data}
-        deactivated_list = [];
-        updates_to_make = []
-        for cedula in eligible_cedulas:
-            current_data = inactivity_map.get(cedula, {'count': 0, 'last_assembly': None});
-            current_count = current_data['count'];
-            last_assembly = current_data['last_assembly']
-            if cedula in voters_cedulas:
-                if current_count > 0 or last_assembly != self.current_assembly_id: updates_to_make.append(
-                    (cedula, 0, self.current_assembly_id, 1))
-            else:
-                new_count = current_count + 1 if last_assembly == self.current_assembly_id else 1
-                new_active_status = 0 if new_count >= LIMITE_INASISTENCIAS_VOTO else 1
-                if new_active_status == 0: res_name = self.execute_query(
-                    "SELECT nombre FROM residentes WHERE cedula = ?", (cedula,),
-                    fetchone=True); deactivated_list.append(f"{res_name[0] if res_name else '??'} ({cedula})"); print(
-                    f"INFO: Residente {cedula} desactivado.")
-                updates_to_make.append((cedula, new_count, self.current_assembly_id, new_active_status))
-        if updates_to_make:
-            conn = sqlite3.connect(DB_NAME);
-            cursor = conn.cursor()
-            try:
-                cursor.executemany(
-                    "UPDATE residentes SET preguntas_consecutivas_sin_votar = ?, ultima_asamblea_actividad = ?, activo = ? WHERE cedula = ?",
-                    [(upd[1], upd[2], upd[3], upd[0]) for upd in updates_to_make]); conn.commit(); print(
-                    f"INFO: Actualizado estado inasistencia para {len(updates_to_make)}.")
-            except sqlite3.Error as e:
-                print(f"ERROR actualizando inasistencias: {e}"); conn.rollback()
-            finally:
-                conn.close()
-        return deactivated_list
+        asistencia = self.execute_query(
+            "SELECT cedula_asistente, tipo_asistente FROM asistencia WHERE asamblea_id = ? AND presente = 1",
+            (self.current_assembly_id,), fetchall=True)
+        if not asistencia: return []
+        presentes_map = {row[0]: row[1] for row in asistencia}
+        poderes_dados = self.execute_query(
+            "SELECT id_unidad_da_poder, cedula_apoderado FROM poderes WHERE asamblea_id = ?",
+            (self.current_assembly_id,), fetchall=True)
+        unidades_con_poder = {row[0]: row[1] for row in poderes_dados} if poderes_dados else {}
+        apoderados_con_poder = {row[1] for row in poderes_dados} if poderes_dados else set()
+        unidades = self.execute_query("SELECT id_unidad, nombre_unidad, coeficiente, cedula_propietario FROM unidades",
+                                      fetchall=True)
+        if not unidades: return []
+        eligible_voters = []
+        for id_u, nom_u, coef, ced_prop in unidades:
+            if not ced_prop: continue
+            if ced_prop in presentes_map and presentes_map[
+                ced_prop] == TIPO_ASISTENTE_PROPIETARIO and id_u not in unidades_con_poder:
+                prop_info = self.execute_query("SELECT nombre FROM propietarios WHERE cedula = ?", (ced_prop,),
+                                               fetchone=True)
+                eligible_voters.append(
+                    {'cedula_ejecuta': ced_prop, 'nombre_ejecuta': prop_info[0] if prop_info else '??',
+                     'id_unidad': id_u, 'nombre_unidad': nom_u, 'coeficiente': coef})
+            elif id_u in unidades_con_poder:
+                ced_apod = unidades_con_poder[id_u]
+                if ced_apod in presentes_map and presentes_map[ced_apod] == TIPO_ASISTENTE_APODERADO:
+                    apod_info = self.execute_query(
+                        "SELECT nombre_asistente FROM asistencia WHERE asamblea_id = ? AND cedula_asistente = ?",
+                        (self.current_assembly_id, ced_apod), fetchone=True)
+                    if not apod_info: apod_info = self.execute_query(
+                        "SELECT nombre_apoderado FROM poderes WHERE asamblea_id = ? AND cedula_apoderado = ? LIMIT 1",
+                        (self.current_assembly_id, ced_apod), fetchone=True)
+                    eligible_voters.append(
+                        {'cedula_ejecuta': ced_apod, 'nombre_ejecuta': apod_info[0] if apod_info else '??',
+                         'id_unidad': id_u, 'nombre_unidad': nom_u, 'coeficiente': coef})
+        return eligible_voters
 
-    def _get_eligible_voter_cedulas(self):
-        # (Lógica actualizada para 1 voto/unidad)
-        if not self.current_assembly_id: return set()
-        all_residents = self.execute_query("SELECT cedula, tipo_residente, casa FROM residentes WHERE activo = 1",
-                                           fetchall=True)
-        if not all_residents: return set()
-        cedulas_dieron_poder = {row[0] for row in
-                                self.execute_query("SELECT cedula_da_poder FROM poderes WHERE asamblea_id = ?",
-                                                   (self.current_assembly_id,), fetchall=True) or []}
-        cedulas_recibieron_poder = {row[0] for row in
-                                    self.execute_query("SELECT cedula_recibe_poder FROM poderes WHERE asamblea_id = ?",
-                                                       (self.current_assembly_id,), fetchall=True) or []}
-        eligible_cedulas = set();
-        casas_con_representante_elegible = set()
-        for cedula, tipo, casa in all_residents:
-            if cedula in cedulas_dieron_poder: continue
-            if tipo == TIPO_RESIDENTE_REPRESENTANTE and casa not in casas_con_representante_elegible:
-                eligible_cedulas.add(cedula);
-                casas_con_representante_elegible.add(casa)
-        for cedula, tipo, casa in all_residents:
-            if cedula in cedulas_dieron_poder: continue
-            if tipo == TIPO_RESIDENTE_ASISTENTE and cedula in cedulas_recibieron_poder:
-                if casa not in casas_con_representante_elegible and cedula not in eligible_cedulas:
-                    eligible_cedulas.add(cedula)
-        return eligible_cedulas
-
-    def load_eligible_voters(self):
+    def load_eligible_voters_for_voting(self):
         # (Sin cambios)
         self.voting_resident_combobox['values'] = [];
         self.voting_resident_combobox.set('')
         if not self.current_assembly_id: return
-        eligible_cedulas = self._get_eligible_voter_cedulas()
-        if not eligible_cedulas: return
-        eligible_details = self.execute_query(
-            f"SELECT cedula, nombre, casa FROM residentes WHERE cedula IN ({','.join('?' * len(eligible_cedulas))}) ORDER BY nombre",
-            list(eligible_cedulas), fetchall=True)
-        eligible_voters_list = [f"{r[0]}: {r[1]} ({r[2]})" for r in eligible_details] if eligible_details else []
-        self.voting_resident_combobox['values'] = eligible_voters_list
-        if eligible_voters_list:
+        eligible_info = self._get_eligible_voters_info()
+        if not eligible_info: return
+        combo_list = [
+            f"{v['cedula_ejecuta']}: {v['nombre_ejecuta']} (Por: {v['nombre_unidad']} / Coef: {v['coeficiente']})" for v
+            in eligible_info]
+        self.voting_resident_combobox['values'] = sorted(combo_list)
+        if combo_list:
             self.voting_resident_combobox.current(0)
         else:
             self.voting_resident_combobox.set('')
 
     def register_vote(self):
-        # (Sin cambios)
+        # (Lógica necesita revisión para manejar 'No Votó' inicial)
         if not self.current_question_id: messagebox.showerror("Error", "Ninguna pregunta activa."); return
-        voter_selection = self.voting_resident_combobox.get();
+        voter_selection_text = self.voting_resident_combobox.get();
         opcion_elegida_str = self.vote_option_var_string.get()
-        if not voter_selection: messagebox.showerror("Error", "Seleccione votante."); return
+        if not voter_selection_text: messagebox.showerror("Error", "Seleccione votante."); return
         if not opcion_elegida_str: messagebox.showerror("Error", "Seleccione opción."); return
         try:
-            cedula_votante = voter_selection.split(":")[0].strip()
-            existing_vote = self.execute_query("SELECT id FROM votos WHERE pregunta_id = ? AND cedula_votante = ?",
-                                               (self.current_question_id, cedula_votante), fetchone=True)
-            if existing_vote:
-                if messagebox.askyesno("Confirmar Cambio", "Ya votó. ¿Cambiar voto?"):
-                    self.execute_query(
-                        "UPDATE votos SET opcion_elegida = ? WHERE pregunta_id = ? AND cedula_votante = ?",
-                        (opcion_elegida_str, self.current_question_id, cedula_votante), commit=True);
-                    messagebox.showinfo("Éxito", "Voto actualizado.")
-                else:
-                    return
-            else:
-                self.execute_query("INSERT INTO votos (pregunta_id, cedula_votante, opcion_elegida) VALUES (?, ?, ?)",
-                                   (self.current_question_id, cedula_votante, opcion_elegida_str), commit=True);
-                messagebox.showinfo("Éxito", "Voto registrado.")
+            cedula_ejecuta = voter_selection_text.split(":")[0].strip()
+            unidad_info_str = voter_selection_text.split('(Por: ')[1].split(' / Coef:')[0]
+            unidad_data = self.execute_query("SELECT id_unidad FROM unidades WHERE nombre_unidad = ?",
+                                             (unidad_info_str,), fetchone=True)
+            if not unidad_data: raise ValueError(f"No se encontró ID para unidad '{unidad_info_str}'")
+            id_unidad_representada = unidad_data[0]
+        except (IndexError, ValueError) as e:
+            messagebox.showerror("Error", f"Error procesando votante: {e}\nTexto: {voter_selection_text}"); return
+        try:
+            # Usar INSERT OR REPLACE o UPDATE/INSERT para manejar el estado inicial 'No Votó'
+            # Por ahora, solo actualiza o inserta el voto seleccionado
             self.execute_query(
-                "UPDATE residentes SET preguntas_consecutivas_sin_votar = 0, ultima_asamblea_actividad = ? WHERE cedula = ?",
-                (self.current_assembly_id, cedula_votante), commit=True)
+                "INSERT OR REPLACE INTO votos (pregunta_id, id_unidad_representada, cedula_ejecuta_voto, opcion_elegida) VALUES (?, ?, ?, ?)",
+                (self.current_question_id, id_unidad_representada, cedula_ejecuta, opcion_elegida_str), commit=True)
+            messagebox.showinfo("Éxito", "Voto registrado/actualizado.")
             self.display_vote_results_for_question(self.current_question_id);
             self.vote_option_var_string.set("")
-        except ValueError:
-            messagebox.showerror("Error", "Selección inválida.")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo registrar: {e}")
 
     def get_voting_weights(self):
-        # (Lógica actualizada para 1 voto/unidad + poderes)
-        if not self.current_assembly_id: return {}
-        weights = {};
-        all_residents_info = self.execute_query("SELECT cedula, tipo_residente, casa FROM residentes WHERE activo = 1",
-                                                fetchall=True)
-        if not all_residents_info: return {}
-        cedulas_dieron_poder = {row[0] for row in
-                                self.execute_query("SELECT cedula_da_poder FROM poderes WHERE asamblea_id = ?",
-                                                   (self.current_assembly_id,), fetchall=True) or []}
-        casas_con_representante_asignado = set()
-        for cedula, tipo, casa in all_residents_info:
-            if cedula not in cedulas_dieron_poder:
-                if tipo == TIPO_RESIDENTE_REPRESENTANTE and casa not in casas_con_representante_asignado:
-                    weights[cedula] = 1;
-                    casas_con_representante_asignado.add(casa)
-                elif tipo == TIPO_RESIDENTE_ASISTENTE:
-                    weights[cedula] = 0
-        proxies_received = self.execute_query(
-            """SELECT cedula_recibe_poder, COUNT(cedula_da_poder) FROM poderes WHERE asamblea_id = ? GROUP BY cedula_recibe_poder""",
-            (self.current_assembly_id,), fetchall=True)
-        if proxies_received:
-            for receiver_cedula, count in proxies_received:
-                if receiver_cedula in weights: weights[receiver_cedula] += count
-        return weights
+        # (Sin cambios)
+        unidades = self.execute_query("SELECT id_unidad, coeficiente FROM unidades", fetchall=True)
+        return {u[0]: u[1] for u in unidades} if unidades else {}
 
     def display_vote_results_for_question(self, question_id_for_results, final=False):
-        # (Sin cambios)
+        # (Lógica necesita revisión para manejar 'No Votó' correctamente)
         if not self.current_assembly_id: messagebox.showwarning("Advertencia",
                                                                 "No hay asamblea."); self.clear_voting_area(); return
         if not question_id_for_results: self.clear_voting_area(); return
@@ -877,8 +1196,6 @@ class App:
                    'results_canvas_widget') and self.results_canvas_widget: self.results_canvas_widget.destroy(); self.results_canvas_widget = None
         if hasattr(self, 'results_display_frame') and self.results_display_frame.winfo_exists():
             for widget in self.results_display_frame.winfo_children(): widget.destroy()
-        votes_data = self.execute_query("SELECT cedula_votante, opcion_elegida FROM votos WHERE pregunta_id = ?",
-                                        (question_id_for_results,), fetchall=True)
         q_info = self.execute_query("SELECT texto_pregunta, estado, opciones_configuradas FROM preguntas WHERE id = ?",
                                     (question_id_for_results,), fetchone=True)
         if not q_info:
@@ -889,39 +1206,65 @@ class App:
         q_text, q_estado, q_options_str = q_info;
         q_options_list = [opt.strip() for opt in q_options_str.split(',')] if q_options_str else ["Acepta", "No Acepta",
                                                                                                   "En Blanco"]
-        if not votes_data:
-            if hasattr(self.results_display_frame,
-                       'winfo_exists') and self.results_display_frame.winfo_exists(): ttk.Label(
-                self.results_display_frame, text=f"Sin votos para:\n'{q_text}'").pack(pady=20)
-            return
-        voting_weights_for_assembly = self.get_voting_weights();
-        weighted_results = Counter()
-        for cedula_votante, opcion_elegida_text in votes_data: weight_of_this_voter_event = voting_weights_for_assembly.get(
-            cedula_votante, 0); weighted_results[opcion_elegida_text] += weight_of_this_voter_event
-        total_weighted_votes_cast = sum(weighted_results.values());
+
+        votes_data = self.execute_query(
+            "SELECT id_unidad_representada, opcion_elegida FROM votos WHERE pregunta_id = ?",
+            (question_id_for_results,), fetchall=True)
+        votes_by_unit = {v[0]: v[1] for v in votes_data} if votes_data else {}
+        all_unit_weights = self.get_voting_weights();
+        total_coeficiente_condominio = sum(all_unit_weights.values())
+        weighted_results = Counter();
+        voted_units_count = Counter();
+        total_coef_voted = 0
+
+        # Contar votos explícitos (excluyendo 'No Votó' si se insertó inicialmente)
+        for id_unidad, coef in all_unit_weights.items():
+            if id_unidad in votes_by_unit and votes_by_unit[id_unidad].lower() != 'no votó':
+                opcion = votes_by_unit[id_unidad]
+                weighted_results[opcion] += coef;
+                voted_units_count[opcion] += 1;
+                total_coef_voted += coef
+            # Las unidades sin voto explícito o con 'No Votó' se contarán después
+
+        coef_no_voto = total_coeficiente_condominio - total_coef_voted
+        if coef_no_voto < -0.0001: coef_no_voto = 0  # Ajuste por flotantes
+
+        no_voto_label = "No Votó"
+        if no_voto_label not in q_options_list: q_options_list.append(no_voto_label)
+        weighted_results[no_voto_label] = coef_no_voto
+        voted_units_count[no_voto_label] = len(all_unit_weights) - sum(
+            v for k, v in voted_units_count.items() if k != no_voto_label)
+
         chart_labels = [];
-        chart_sizes = [];
-        raw_counts_display = Counter()
-        for option_text_label in q_options_list:
-            total_weight_for_option = weighted_results[option_text_label];
-            count_for_option = sum(1 for _, o_elegida in votes_data if o_elegida == option_text_label);
-            raw_counts_display[option_text_label] = count_for_option
+        chart_sizes = []
+        options_for_chart = q_options_list  # Mostrar todas las opciones incluyendo 'No Votó'
+
+        for option_text_label in options_for_chart:
+            coef_for_option = weighted_results[option_text_label]
             percentage = (
-                                     total_weight_for_option / total_weighted_votes_cast) * 100 if total_weighted_votes_cast > 0 else 0;
-            chart_labels.append(f"{option_text_label}\n({total_weight_for_option} p, {percentage:.1f}%)");
-            chart_sizes.append(total_weight_for_option)
-        if not chart_sizes or all(s == 0 for s in chart_sizes):
+                                     coef_for_option / total_coeficiente_condominio) * 100 if total_coeficiente_condominio > 0 else 0
+            # Solo añadir al gráfico si el coeficiente es significativo
+            if coef_for_option > 0.0001:
+                chart_labels.append(f"{option_text_label}\n({coef_for_option:.4f} coef, {percentage:.1f}%)")
+                chart_sizes.append(coef_for_option)
+            # Asegurar que el conteo de unidades exista aunque el coef sea 0
+            if option_text_label not in voted_units_count: voted_units_count[option_text_label] = 0
+
+        if not chart_sizes:  # Si no hay votos con peso significativo
             if hasattr(self.results_display_frame,
                        'winfo_exists') and self.results_display_frame.winfo_exists(): ttk.Label(
-                self.results_display_frame, text=f"Sin votos válidos:\n'{q_text}'").pack(pady=20)
+                self.results_display_frame, text=f"Sin votos válidos para graficar:\n'{q_text}'").pack(pady=20)
             return
+
         fig, ax = plt.subplots(figsize=(6, 4.5));
-        wedges, _, autotexts = ax.pie(chart_sizes, labels=None, autopct=lambda p: '{:.1f}%'.format(p) if p > 0 else '',
-                                      startangle=90, pctdistance=0.85, wedgeprops=dict(width=0.4));
+        wedges, _, autotexts = ax.pie(chart_sizes, labels=None,
+                                      autopct=lambda p: '{:.1f}%'.format(p) if p > 0.1 else '', startangle=90,
+                                      pctdistance=0.85, wedgeprops=dict(width=0.4));
         ax.axis('equal');
         ax.legend(wedges, chart_labels, title="Opciones", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1),
                   fontsize='small');
         plt.subplots_adjust(left=0.05, right=0.65, top=0.9, bottom=0.05)
+
         title_text = f"Resultados: {q_text}"
         if final:
             title_text = f"Resultados Finales: {q_text}"
@@ -930,15 +1273,16 @@ class App:
         elif q_estado == ESTADO_PREGUNTA_CERRADA:
             title_text = f"Resultados (Votación Cerrada): {q_text}"
         plt.title(title_text, pad=20, loc='center', fontsize=10)
-        info_text_lines = [f"Pregunta ID: {question_id_for_results}"];
-        info_text_lines.append("\nConteo (votantes):");
-        for opt_text, count in raw_counts_display.items(): info_text_lines.append(f"- {opt_text}: {count}")
-        info_text_lines.append(f"\nTotal peso emitido: {total_weighted_votes_cast}");
-        total_possible_weight_in_assembly = sum(voting_weights_for_assembly.values());
-        info_text_lines.append(f"Total peso posible: {total_possible_weight_in_assembly}")
-        if total_possible_weight_in_assembly > 0: participation = (
-                                                                              total_weighted_votes_cast / total_possible_weight_in_assembly) * 100; info_text_lines.append(
-            f"Participación: {participation:.1f}%")
+
+        info_text_lines = [f"Pregunta ID: {question_id_for_results}"]
+        info_text_lines.append("\nConteo (unidades):")
+        for opt_text in q_options_list: info_text_lines.append(f"- {opt_text}: {voted_units_count[opt_text]}")
+        info_text_lines.append(f"\nTotal Coeficiente Condominio: {total_coeficiente_condominio:.4f}")
+        info_text_lines.append(f"Coeficiente Votado (excl. No Votó): {total_coef_voted:.4f}")
+        if total_coeficiente_condominio > 0: participation = (
+                                                                         total_coef_voted / total_coeficiente_condominio) * 100; info_text_lines.append(
+            f"Participación (coeficiente): {participation:.1f}%")
+
         if hasattr(self.results_display_frame, 'winfo_exists') and self.results_display_frame.winfo_exists():
             ttk.Label(self.results_display_frame, text="\n".join(info_text_lines), justify=tk.LEFT,
                       wraplength=380).pack(pady=5, anchor='w', padx=5)
@@ -961,6 +1305,7 @@ class App:
             self.results_canvas_widget = figure_canvas.get_tk_widget();
             self.results_canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True);
             figure_canvas.draw()
+
         plt.close(fig)
 
 
