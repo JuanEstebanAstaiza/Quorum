@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog, filedialog  # filedialog para buscar archivo
+from tkinter import ttk, messagebox, simpledialog, filedialog
 import sqlite3
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -7,7 +7,6 @@ from collections import Counter, defaultdict
 import os
 import datetime
 
-# Intentar importar pandas, mostrar error si no está
 try:
     import pandas as pd
 
@@ -37,7 +36,7 @@ OPCION_NO_VOTO = "No Votó"
 
 # --- Funciones de Base de Datos e Inicialización ---
 def init_app_dirs_and_db():
-    """Inicializa directorios y la DB con la nueva estructura v8."""
+    """Inicializa directorios y la DB con la nueva estructura v9."""
     if not os.path.exists(HOST_DATA_DIR):
         try:
             os.makedirs(HOST_DATA_DIR)
@@ -55,25 +54,23 @@ def init_app_dirs_and_db():
     # --- Tabla propietarios ---
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS propietarios (
-        cedula TEXT PRIMARY KEY, nombre TEXT NOT NULL, celular TEXT UNIQUE, activo INTEGER DEFAULT 1
-    )''')
-    cols_to_drop = ['tipo_residente', 'casa', 'preguntas_consecutivas_sin_votar', 'ultima_asamblea_actividad',
-                    'telegram_user_id']
-    existing_cols = [col[1] for col in cursor.execute("PRAGMA table_info(propietarios)").fetchall()]
-    for col in cols_to_drop:
-        if col in existing_cols:
-            try:
-                cursor.execute(f"ALTER TABLE propietarios DROP COLUMN {col}"); print(f"Columna {col} eliminada.")
-            except sqlite3.Error as e:
-                print(f"No se pudo eliminar columna {col}: {e}")
+        cedula TEXT PRIMARY KEY, 
+        nombre TEXT NOT NULL, 
+        celular TEXT UNIQUE, 
+        activo INTEGER DEFAULT 1
+    )
+    ''')
 
     # --- Tabla unidades ---
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS unidades (
-        id_unidad INTEGER PRIMARY KEY AUTOINCREMENT, nombre_unidad TEXT UNIQUE NOT NULL, 
-        coeficiente REAL DEFAULT 0.0, cedula_propietario TEXT,
-        FOREIGN KEY (cedula_propietario) REFERENCES propietarios(cedula) ON DELETE SET NULL ON UPDATE CASCADE 
-    )''')
+        id_unidad INTEGER PRIMARY KEY AUTOINCREMENT, 
+        nombre_unidad TEXT UNIQUE NOT NULL, 
+        coeficiente REAL DEFAULT 0.0, 
+        cedula_propietario TEXT,
+        FOREIGN KEY (cedula_propietario) REFERENCES propietarios(cedula) ON DELETE SET NULL ON UPDATE CASCADE
+    )
+    ''')
 
     # --- Tabla asambleas ---
     cursor.execute(
@@ -82,54 +79,56 @@ def init_app_dirs_and_db():
     # --- Tabla poderes ---
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS poderes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, asamblea_id INTEGER NOT NULL, id_unidad_da_poder INTEGER NOT NULL, 
-        cedula_apoderado TEXT NOT NULL, nombre_apoderado TEXT, 
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        asamblea_id INTEGER NOT NULL, 
+        id_unidad_da_poder INTEGER NOT NULL, 
+        cedula_apoderado TEXT NOT NULL, 
+        nombre_apoderado TEXT, 
         FOREIGN KEY (asamblea_id) REFERENCES asambleas(id) ON DELETE CASCADE, 
         FOREIGN KEY (id_unidad_da_poder) REFERENCES unidades(id_unidad) ON DELETE CASCADE,
         UNIQUE (asamblea_id, id_unidad_da_poder) 
-    )''')
+    )
+    ''')
 
     # --- Tabla asistencia ---
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS asistencia (
-        id_asistencia INTEGER PRIMARY KEY AUTOINCREMENT, asamblea_id INTEGER NOT NULL,
-        cedula_asistente TEXT NOT NULL, nombre_asistente TEXT, tipo_asistente TEXT NOT NULL, 
+        id_asistencia INTEGER PRIMARY KEY AUTOINCREMENT, 
+        asamblea_id INTEGER NOT NULL,
+        cedula_asistente TEXT NOT NULL, 
+        nombre_asistente TEXT, 
+        tipo_asistente TEXT NOT NULL, -- 'Propietario' o 'Apoderado'
         presente INTEGER DEFAULT 0, 
         FOREIGN KEY (asamblea_id) REFERENCES asambleas(id) ON DELETE CASCADE,
         UNIQUE (asamblea_id, cedula_asistente)
-    )''')
+    )
+    ''')
 
     # --- Tabla preguntas ---
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS preguntas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, asamblea_id INTEGER NOT NULL, texto_pregunta TEXT NOT NULL,
-        opciones_configuradas TEXT, estado TEXT DEFAULT 'inactiva', 
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        asamblea_id INTEGER NOT NULL, 
+        texto_pregunta TEXT NOT NULL,
+        opciones_configuradas TEXT, 
+        estado TEXT DEFAULT 'inactiva', 
         FOREIGN KEY (asamblea_id) REFERENCES asambleas(id) ON DELETE CASCADE
-    )''')
-    try:
-        cursor.execute("SELECT activa FROM preguntas LIMIT 1"); print("Migrando 'activa' a 'estado'"); cursor.execute(
-            "ALTER TABLE preguntas RENAME COLUMN activa TO estado_old_int"); cursor.execute(
-            f"ALTER TABLE preguntas ADD COLUMN estado TEXT DEFAULT '{ESTADO_PREGUNTA_INACTIVA}'"); cursor.execute(
-            f"UPDATE preguntas SET estado = '{ESTADO_PREGUNTA_ACTIVA}' WHERE estado_old_int = 1"); cursor.execute(
-            f"UPDATE preguntas SET estado = '{ESTADO_PREGUNTA_CERRADA}' WHERE estado_old_int = 0"); cursor.execute(
-            "ALTER TABLE preguntas DROP COLUMN estado_old_int"); conn.commit(); print("Migración completada.")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("SELECT estado FROM preguntas LIMIT 1")
-    except sqlite3.OperationalError:
-        print("Añadiendo 'estado' a 'preguntas'."); cursor.execute(
-            f"ALTER TABLE preguntas ADD COLUMN estado TEXT DEFAULT '{ESTADO_PREGUNTA_INACTIVA}'"); conn.commit()
+    )
+    ''')
 
     # --- Tabla votos ---
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS votos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, pregunta_id INTEGER NOT NULL, id_unidad_representada INTEGER NOT NULL, 
-        cedula_ejecuta_voto TEXT, opcion_elegida TEXT NOT NULL, 
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        pregunta_id INTEGER NOT NULL, 
+        id_unidad_representada INTEGER NOT NULL, 
+        cedula_ejecuta_voto TEXT, 
+        opcion_elegida TEXT NOT NULL, 
         FOREIGN KEY (pregunta_id) REFERENCES preguntas(id) ON DELETE CASCADE, 
         FOREIGN KEY (id_unidad_representada) REFERENCES unidades(id_unidad) ON DELETE CASCADE,
         UNIQUE (pregunta_id, id_unidad_representada) 
-    )''')
+    )
+    ''')
 
     cursor.execute("PRAGMA foreign_keys = ON")
     conn.commit();
@@ -140,8 +139,8 @@ def init_app_dirs_and_db():
 class App:
     def __init__(self, root):
         self.root = root;
-        self.root.title("Gestión Asambleas Condominio v8");
-        self.root.geometry("1200x800")
+        self.root.title("Gestión Asambleas Condominio v9");
+        self.root.geometry("1250x850")
         style = ttk.Style();
         style.theme_use('clam')
         self.current_assembly_id = None;
@@ -256,7 +255,12 @@ class App:
                 self.execute_query(
                     "INSERT OR IGNORE INTO propietarios (cedula, nombre, celular, activo) VALUES (?, ?, ?, 1)",
                     (cedula, nombre, celular), commit=True);
-                messagebox.showinfo("Éxito", "Propietario registrado (o ya existía).")
+                # Verificar si se insertó o se ignoró
+                if self.execute_query("SELECT 1 FROM propietarios WHERE cedula = ?", (cedula,), fetchone=True):
+                    messagebox.showinfo("Éxito", "Propietario registrado (o ya existía).")
+                else:  # No debería pasar con INSERT OR IGNORE si la cédula es PK, pero por si acaso
+                    messagebox.showerror("Error", "No se pudo registrar el propietario.")
+
             self.clear_propietario_fields();
             self.load_propietarios()
         except sqlite3.IntegrityError as e:
@@ -323,6 +327,7 @@ class App:
 
     # --- Pestaña Unidades ---
     def setup_unidad_tab(self):
+        # (Sin cambios)
         frame = self.unidad_tab;
         form_frame = ttk.LabelFrame(frame, text="Registrar/Actualizar Unidad", padding=10);
         form_frame.pack(padx=10, pady=10, fill="x")
@@ -456,6 +461,7 @@ class App:
 
     # --- Pestaña Asambleas/Poderes ---
     def setup_asamblea_tab(self):
+        # (Sin cambios UI)
         frame = self.asamblea_tab;
         assembly_selection_frame = ttk.LabelFrame(frame, text="Gestión Asamblea", padding=10);
         assembly_selection_frame.pack(padx=10, pady=10, fill="x")
@@ -906,7 +912,6 @@ class App:
 
     # --- Pestaña Votación ---
     def setup_voting_tab(self):
-        # (Sin cambios UI)
         frame = self.voting_tab;
         question_select_frame = ttk.LabelFrame(frame, text="Seleccionar Pregunta", padding=10);
         question_select_frame.pack(padx=10, pady=10, fill="x")
@@ -940,7 +945,6 @@ class App:
         self.results_canvas_widget = None
 
     def load_questions_for_voting_tab(self):
-        # (Sin cambios)
         if not self.current_assembly_id: self.voting_question_combobox[
             'values'] = []; self.voting_question_combobox.set(''); self.clear_voting_area(); return
         questions = self.execute_query("SELECT id, texto_pregunta FROM preguntas WHERE asamblea_id = ? ORDER BY id",
@@ -956,7 +960,6 @@ class App:
                 ''); self.clear_voting_area()
 
     def clear_voting_area(self):
-        # (Sin cambios)
         self.current_question_id = None;
         self.current_question_options = []
         if hasattr(self, 'active_question_label'): self.active_question_label.config(text="Pregunta Activa: Ninguna")
@@ -972,7 +975,6 @@ class App:
                 if widget != self.results_canvas_widget: widget.destroy()
 
     def on_voting_question_selected_for_display(self, event=None):
-        # (Sin cambios)
         selection = self.voting_question_combobox.get()
         if selection:
             try:
@@ -986,7 +988,6 @@ class App:
                 messagebox.showerror("Error", "Selección inválida.")
 
     def update_vote_options_ui(self, question_id, for_display_only=False):
-        # (Sin cambios)
         if hasattr(self, 'options_radio_frame') and self.options_radio_frame.winfo_exists():
             for widget in self.options_radio_frame.winfo_children(): widget.destroy()
         self.current_question_options = []
@@ -1041,7 +1042,6 @@ class App:
         cursor = conn.cursor()
         inserted_count = 0
         try:
-            # Usar INSERT OR IGNORE para no fallar si ya existe
             cursor.executemany(
                 f"INSERT OR IGNORE INTO votos (pregunta_id, id_unidad_representada, cedula_ejecuta_voto, opcion_elegida) VALUES (?, ?, NULL, '{OPCION_NO_VOTO}')",
                 initial_votes_to_insert)
@@ -1069,10 +1069,10 @@ class App:
         self.active_question_label.config(text=f"Pregunta Activa (ID: {self.current_question_id}): {question_text}")
 
         self.update_vote_options_ui(self.current_question_id, for_display_only=False);
-        self.load_eligible_voters_for_voting();  # Cargar combo votantes
-        self.display_vote_results_for_question(self.current_question_id);  # Mostrar estado inicial
+        self.load_eligible_voters_for_voting();
+        self.display_vote_results_for_question(self.current_question_id);
         self.load_questions_for_assembly()
-        self.load_questions_for_lista_vt()  # Actualizar preguntas en lista votación
+        self.load_questions_for_lista_vt()
         messagebox.showinfo("Votación Activada",
                             f"Pregunta '{question_text}' activa. Estado inicial: '{OPCION_NO_VOTO}'.")
 
@@ -1084,18 +1084,15 @@ class App:
                                     fetchone=True);
         question_text_closed = q_info[0] if q_info else f"ID {question_id_to_close}"
 
-        # La lógica de 'No Votó' ya está implícita porque solo se sobrescriben los votos emitidos.
-
         # Marcar pregunta como cerrada
         self.execute_query("UPDATE preguntas SET estado = ? WHERE id = ?",
                            (ESTADO_PREGUNTA_CERRADA, question_id_to_close,), commit=True);
         self.load_questions_for_assembly()
 
         messagebox.showinfo("Votación Cerrada", f"Se cerró votación para: '{question_text_closed}'.");
-        self.display_vote_results_for_question(question_id_to_close, final=True)  # Mostrar y guardar gráfico final
-        self.load_lista_votacion_data()  # Actualizar la tabla de lista de votación
+        self.display_vote_results_for_question(question_id_to_close, final=True)
+        self.load_lista_votacion_data()
 
-        # Limpiar área de votación
         self.current_question_id = None;
         self.current_question_options = []
         self.active_question_label.config(text="Pregunta Activa: Ninguna");
@@ -1106,7 +1103,6 @@ class App:
             for widget in self.options_radio_frame.winfo_children(): widget.destroy()
 
     def _get_eligible_voters_info(self):
-        # (Sin cambios)
         if not self.current_assembly_id: return []
         asistencia = self.execute_query(
             "SELECT cedula_asistente, tipo_asistente FROM asistencia WHERE asamblea_id = ? AND presente = 1",
@@ -1146,7 +1142,6 @@ class App:
         return eligible_voters
 
     def load_eligible_voters_for_voting(self):
-        # (Sin cambios)
         self.voting_resident_combobox['values'] = [];
         self.voting_resident_combobox.set('')
         if not self.current_assembly_id: return
@@ -1162,7 +1157,6 @@ class App:
             self.voting_resident_combobox.set('')
 
     def register_vote(self):
-        # (Sin cambios)
         if not self.current_question_id: messagebox.showerror("Error", "Ninguna pregunta activa."); return
         voter_selection_text = self.voting_resident_combobox.get();
         opcion_elegida_str = self.vote_option_var_string.get()
@@ -1188,12 +1182,10 @@ class App:
             messagebox.showerror("Error", f"No se pudo registrar: {e}")
 
     def get_voting_weights(self):
-        # (Sin cambios)
         unidades = self.execute_query("SELECT id_unidad, coeficiente FROM unidades", fetchall=True)
         return {u[0]: u[1] for u in unidades} if unidades else {}
 
     def display_vote_results_for_question(self, question_id_for_results, final=False):
-        # (Sin cambios)
         if not self.current_assembly_id: messagebox.showwarning("Advertencia",
                                                                 "No hay asamblea."); self.clear_voting_area(); return
         if not question_id_for_results: self.clear_voting_area(); return
@@ -1299,7 +1291,6 @@ class App:
 
     # --- Pestaña Lista Votación ---
     def setup_lista_vt_tab(self):
-        # (Sin cambios UI)
         frame = self.lista_vt_tab;
         filter_frame = ttk.LabelFrame(frame, text="Filtros", padding=10);
         filter_frame.pack(padx=10, pady=10, fill="x")
@@ -1334,13 +1325,11 @@ class App:
         scrollbar.pack(side=tk.RIGHT, fill="y")
 
     def on_lista_vt_assembly_selected(self, event=None):
-        # (Sin cambios)
         self.load_questions_for_lista_vt()
         if hasattr(self, 'lista_vt_tree'):
             for i in self.lista_vt_tree.get_children(): self.lista_vt_tree.delete(i)
 
     def load_questions_for_lista_vt(self, event=None):
-        # (Sin cambios)
         self.lista_vt_pregunta_combo['values'] = [];
         self.lista_vt_pregunta_combo.set('')
         if hasattr(self, 'lista_vt_tree'):
@@ -1358,7 +1347,6 @@ class App:
             if questions: self.lista_vt_pregunta_combo.current(0); self.load_lista_votacion_data()
 
     def load_lista_votacion_data(self, event=None):
-        # (Sin cambios)
         if hasattr(self, 'lista_vt_tree'):
             for i in self.lista_vt_tree.get_children(): self.lista_vt_tree.delete(i)
         asamblea_selection = self.lista_vt_asamblea_combo.get();
@@ -1385,7 +1373,6 @@ class App:
 
     # --- Pestaña Importar Excel ---
     def setup_import_tab(self):
-        # (Sin cambios)
         frame = self.import_tab;
         file_frame = ttk.LabelFrame(frame, text="Seleccionar Archivo Excel", padding=10);
         file_frame.pack(padx=10, pady=10, fill="x")
@@ -1433,7 +1420,6 @@ class App:
         log_scroll.pack(side=tk.RIGHT, fill="y")
 
     def browse_excel_file(self):
-        # (Sin cambios)
         filetypes = (("Archivos Excel", "*.xlsx *.xls"), ("Todos", "*.*"));
         filepath = filedialog.askopenfilename(title="Seleccionar Excel", filetypes=filetypes)
         if filepath:
@@ -1442,14 +1428,12 @@ class App:
             self.excel_file_path.set("Ningún archivo")
 
     def log_import_message(self, message):
-        # (Sin cambios)
         self.import_log_text.config(state="normal");
         self.import_log_text.insert(tk.END, message + "\n");
         self.import_log_text.config(state="disabled");
         self.import_log_text.see(tk.END)
 
     def import_data_from_excel(self):
-        # (Corrección if/else multilínea)
         if not PANDAS_AVAILABLE: messagebox.showerror("Error Librería",
                                                       "Instala 'pandas' y 'openpyxl'.\nEjecuta: pip install pandas openpyxl"); return
         filepath = self.excel_file_path.get();
@@ -1494,37 +1478,28 @@ class App:
                 except ValueError:
                     self.log_import_message(
                         f"FILA {index + 2} OMITIDA: Coef '{coef_str}' inválido (Unidad '{unidad}')."); errors += 1; continue
-
-                # Intentar insertar propietario
                 try:
                     cursor.execute(
                         "INSERT OR IGNORE INTO propietarios (cedula, nombre, celular, activo) VALUES (?, ?, ?, 1)",
                         (cedula, nombre, celular if celular else None))
-                    # Corregido: if/else multilínea
                     if cursor.rowcount > 0:
                         props_added += 1
                     else:
                         props_skipped += 1
                 except sqlite3.IntegrityError as e:
-                    self.log_import_message(f"FILA {index + 2} ERROR PROP: {e} (Céd: {cedula}, Cel: {celular})");
-                    errors += 1;
-                    continue
-
-                    # Intentar insertar unidad
+                    self.log_import_message(
+                        f"FILA {index + 2} ERROR PROP: {e} (Céd: {cedula}, Cel: {celular})"); errors += 1; continue
                 try:
                     cursor.execute(
                         "INSERT OR IGNORE INTO unidades (nombre_unidad, coeficiente, cedula_propietario) VALUES (?, ?, ?)",
                         (unidad, coef, cedula))
-                    # Corregido: if/else multilínea
                     if cursor.rowcount > 0:
                         unidades_added += 1
                     else:
                         unidades_skipped += 1
                 except sqlite3.Error as e:
                     self.log_import_message(
-                        f"FILA {index + 2} ERROR UNIDAD: {e} (Unidad: {unidad}, Céd Prop: {cedula})");
-                    errors += 1;
-
+                        f"FILA {index + 2} ERROR UNIDAD: {e} (Unidad: {unidad}, Céd Prop: {cedula})"); errors += 1;
             conn.commit();
             conn.close()
             summary = f"--- Fin Importación ---\nProp. Nuevos: {props_added}\nProp. Omitidos: {props_skipped}\nUnidades Nuevas: {unidades_added}\nUnidades Omitidas: {unidades_skipped}\nErrores/Omitidos: {errors}"
