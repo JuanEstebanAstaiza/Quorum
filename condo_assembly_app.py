@@ -34,9 +34,41 @@ TIPO_ASISTENTE_APODERADO = 'Apoderado'
 OPCION_NO_VOTO = "No Votó"
 
 
+# --- Clase Auxiliar para Frame con Scroll ---
+class ScrolledFrame(ttk.Frame):
+    """Un frame con scrollbars verticales."""
+
+    def __init__(self, parent, *args, **kwargs):
+        super().__init__(parent, *args, **kwargs)
+
+        # Crear un canvas y una barra de scroll vertical
+        self.canvas = tk.Canvas(self, borderwidth=0, background="#ffffff")
+        self.v_scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.v_scrollbar.set)
+
+        self.v_scrollbar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+
+        # Frame interior que contendrá los widgets
+        self.interior = ttk.Frame(self.canvas)
+        self.interior_id = self.canvas.create_window((0, 0), window=self.interior, anchor="nw")
+
+        # Configurar el canvas para que se redimensione con el frame interior
+        self.interior.bind("<Configure>", self._on_interior_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+    def _on_interior_configure(self, event):
+        # Actualizar la región de scroll del canvas
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event):
+        # Redimensionar el frame interior al ancho del canvas
+        self.canvas.itemconfig(self.interior_id, width=event.width)
+
+
 # --- Funciones de Base de Datos e Inicialización ---
 def init_app_dirs_and_db():
-    """Inicializa directorios y la DB con la nueva estructura v9."""
+    # (Sin cambios desde v10)
     if not os.path.exists(HOST_DATA_DIR):
         try:
             os.makedirs(HOST_DATA_DIR)
@@ -50,86 +82,20 @@ def init_app_dirs_and_db():
 
     conn = sqlite3.connect(DB_NAME);
     cursor = conn.cursor()
-
-    # --- Tabla propietarios ---
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS propietarios (
-        cedula TEXT PRIMARY KEY, 
-        nombre TEXT NOT NULL, 
-        celular TEXT UNIQUE, 
-        activo INTEGER DEFAULT 1
-    )
-    ''')
-
-    # --- Tabla unidades ---
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS unidades (
-        id_unidad INTEGER PRIMARY KEY AUTOINCREMENT, 
-        nombre_unidad TEXT UNIQUE NOT NULL, 
-        coeficiente REAL DEFAULT 0.0, 
-        cedula_propietario TEXT,
-        FOREIGN KEY (cedula_propietario) REFERENCES propietarios(cedula) ON DELETE SET NULL ON UPDATE CASCADE
-    )
-    ''')
-
-    # --- Tabla asambleas ---
+    cursor.execute(
+        '''CREATE TABLE IF NOT EXISTS propietarios (cedula TEXT PRIMARY KEY, nombre TEXT NOT NULL, celular TEXT UNIQUE, activo INTEGER DEFAULT 1)''')
+    cursor.execute(
+        '''CREATE TABLE IF NOT EXISTS unidades (id_unidad INTEGER PRIMARY KEY AUTOINCREMENT, nombre_unidad TEXT UNIQUE NOT NULL, coeficiente REAL DEFAULT 0.0, cedula_propietario TEXT, FOREIGN KEY (cedula_propietario) REFERENCES propietarios(cedula) ON DELETE SET NULL ON UPDATE CASCADE)''')
     cursor.execute(
         '''CREATE TABLE IF NOT EXISTS asambleas (id INTEGER PRIMARY KEY AUTOINCREMENT, fecha TEXT NOT NULL, descripcion TEXT)''')
-
-    # --- Tabla poderes ---
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS poderes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        asamblea_id INTEGER NOT NULL, 
-        id_unidad_da_poder INTEGER NOT NULL, 
-        cedula_apoderado TEXT NOT NULL, 
-        nombre_apoderado TEXT, 
-        FOREIGN KEY (asamblea_id) REFERENCES asambleas(id) ON DELETE CASCADE, 
-        FOREIGN KEY (id_unidad_da_poder) REFERENCES unidades(id_unidad) ON DELETE CASCADE,
-        UNIQUE (asamblea_id, id_unidad_da_poder) 
-    )
-    ''')
-
-    # --- Tabla asistencia ---
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS asistencia (
-        id_asistencia INTEGER PRIMARY KEY AUTOINCREMENT, 
-        asamblea_id INTEGER NOT NULL,
-        cedula_asistente TEXT NOT NULL, 
-        nombre_asistente TEXT, 
-        tipo_asistente TEXT NOT NULL, -- 'Propietario' o 'Apoderado'
-        presente INTEGER DEFAULT 0, 
-        FOREIGN KEY (asamblea_id) REFERENCES asambleas(id) ON DELETE CASCADE,
-        UNIQUE (asamblea_id, cedula_asistente)
-    )
-    ''')
-
-    # --- Tabla preguntas ---
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS preguntas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        asamblea_id INTEGER NOT NULL, 
-        texto_pregunta TEXT NOT NULL,
-        opciones_configuradas TEXT, 
-        estado TEXT DEFAULT 'inactiva', 
-        FOREIGN KEY (asamblea_id) REFERENCES asambleas(id) ON DELETE CASCADE
-    )
-    ''')
-
-    # --- Tabla votos ---
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS votos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        pregunta_id INTEGER NOT NULL, 
-        id_unidad_representada INTEGER NOT NULL, 
-        cedula_ejecuta_voto TEXT, 
-        opcion_elegida TEXT NOT NULL, 
-        FOREIGN KEY (pregunta_id) REFERENCES preguntas(id) ON DELETE CASCADE, 
-        FOREIGN KEY (id_unidad_representada) REFERENCES unidades(id_unidad) ON DELETE CASCADE,
-        UNIQUE (pregunta_id, id_unidad_representada) 
-    )
-    ''')
-
+    cursor.execute(
+        '''CREATE TABLE IF NOT EXISTS poderes (id INTEGER PRIMARY KEY AUTOINCREMENT, asamblea_id INTEGER NOT NULL, id_unidad_da_poder INTEGER NOT NULL, cedula_apoderado TEXT NOT NULL, nombre_apoderado TEXT, FOREIGN KEY (asamblea_id) REFERENCES asambleas(id) ON DELETE CASCADE, FOREIGN KEY (id_unidad_da_poder) REFERENCES unidades(id_unidad) ON DELETE CASCADE, UNIQUE (asamblea_id, id_unidad_da_poder))''')
+    cursor.execute(
+        '''CREATE TABLE IF NOT EXISTS asistencia (id_asistencia INTEGER PRIMARY KEY AUTOINCREMENT, asamblea_id INTEGER NOT NULL, cedula_asistente TEXT NOT NULL, nombre_asistente TEXT, tipo_asistente TEXT NOT NULL, presente INTEGER DEFAULT 0, FOREIGN KEY (asamblea_id) REFERENCES asambleas(id) ON DELETE CASCADE, UNIQUE (asamblea_id, cedula_asistente))''')
+    cursor.execute(
+        '''CREATE TABLE IF NOT EXISTS preguntas (id INTEGER PRIMARY KEY AUTOINCREMENT, asamblea_id INTEGER NOT NULL, texto_pregunta TEXT NOT NULL, opciones_configuradas TEXT, estado TEXT DEFAULT 'inactiva', FOREIGN KEY (asamblea_id) REFERENCES asambleas(id) ON DELETE CASCADE)''')
+    cursor.execute(
+        '''CREATE TABLE IF NOT EXISTS votos (id INTEGER PRIMARY KEY AUTOINCREMENT, pregunta_id INTEGER NOT NULL, id_unidad_representada INTEGER NOT NULL, cedula_ejecuta_voto TEXT, opcion_elegida TEXT NOT NULL, FOREIGN KEY (pregunta_id) REFERENCES preguntas(id) ON DELETE CASCADE, FOREIGN KEY (id_unidad_representada) REFERENCES unidades(id_unidad) ON DELETE CASCADE, UNIQUE (pregunta_id, id_unidad_representada))''')
     cursor.execute("PRAGMA foreign_keys = ON")
     conn.commit();
     conn.close()
@@ -139,7 +105,7 @@ def init_app_dirs_and_db():
 class App:
     def __init__(self, root):
         self.root = root;
-        self.root.title("Gestión Asambleas Condominio v9");
+        self.root.title("Gestión Asambleas Condominio v11");
         self.root.geometry("1250x850")
         style = ttk.Style();
         style.theme_use('clam')
@@ -147,7 +113,7 @@ class App:
         self.current_question_id = None
         self.current_question_options = [];
         self.editing_question_id = None
-        self.asistencia_data = {}
+        self.asistencia_vars = {}  # {cedula_asistente: tk.BooleanVar()}
         self.excel_file_path = tk.StringVar()
 
         self.notebook = ttk.Notebook(root)
@@ -181,6 +147,7 @@ class App:
         self.load_asambleas()
 
     def execute_query(self, query, params=(), fetchone=False, fetchall=False, commit=False):
+        # (Sin cambios)
         conn = sqlite3.connect(DB_NAME);
         conn.execute("PRAGMA foreign_keys = ON");
         cursor = conn.cursor();
@@ -196,7 +163,7 @@ class App:
             if conn: conn.close()
         return result
 
-    # --- Pestaña Propietarios ---
+    # --- Pestaña Propietarios (sin cambios) ---
     def setup_propietario_tab(self):
         frame = self.propietario_tab;
         form_frame = ttk.LabelFrame(frame, text="Registrar/Actualizar Propietario", padding=10);
@@ -255,12 +222,10 @@ class App:
                 self.execute_query(
                     "INSERT OR IGNORE INTO propietarios (cedula, nombre, celular, activo) VALUES (?, ?, ?, 1)",
                     (cedula, nombre, celular), commit=True);
-                # Verificar si se insertó o se ignoró
                 if self.execute_query("SELECT 1 FROM propietarios WHERE cedula = ?", (cedula,), fetchone=True):
                     messagebox.showinfo("Éxito", "Propietario registrado (o ya existía).")
-                else:  # No debería pasar con INSERT OR IGNORE si la cédula es PK, pero por si acaso
+                else:
                     messagebox.showerror("Error", "No se pudo registrar el propietario.")
-
             self.clear_propietario_fields();
             self.load_propietarios()
         except sqlite3.IntegrityError as e:
@@ -325,9 +290,8 @@ class App:
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo actualizar: {e}")
 
-    # --- Pestaña Unidades ---
+    # --- Pestaña Unidades (sin cambios) ---
     def setup_unidad_tab(self):
-        # (Sin cambios)
         frame = self.unidad_tab;
         form_frame = ttk.LabelFrame(frame, text="Registrar/Actualizar Unidad", padding=10);
         form_frame.pack(padx=10, pady=10, fill="x")
@@ -461,7 +425,6 @@ class App:
 
     # --- Pestaña Asambleas/Poderes ---
     def setup_asamblea_tab(self):
-        # (Sin cambios UI)
         frame = self.asamblea_tab;
         assembly_selection_frame = ttk.LabelFrame(frame, text="Gestión Asamblea", padding=10);
         assembly_selection_frame.pack(padx=10, pady=10, fill="x")
@@ -525,7 +488,7 @@ class App:
         ttk.Button(question_button_frame, text="Guardar Pregunta", command=self.save_question).pack(side=tk.LEFT,
                                                                                                     padx=5);
         ttk.Button(question_button_frame, text="Nueva (Limpiar)", command=self.clear_question_fields).pack(side=tk.LEFT,
-                                                                                                           padx=5)
+                                                                                                           padx=5)  # Ajustado aquí
         question_list_frame = ttk.Frame(questions_frame);
         question_list_frame.pack(fill="both", expand=True, pady=5)
         self.questions_tree = ttk.Treeview(question_list_frame,
@@ -643,8 +606,8 @@ class App:
                 if hasattr(self, 'asistencia_asamblea_combo'): self.asistencia_asamblea_combo.current(0)
                 if hasattr(self, 'lista_vt_asamblea_combo'): self.lista_vt_asamblea_combo.current(0)
                 self.on_assembly_selected();
-                self.load_asistencia_for_assembly();
-                self.load_questions_for_lista_vt()
+                if hasattr(self, 'load_asistencia_for_assembly'): self.load_asistencia_for_assembly()
+                if hasattr(self, 'load_questions_for_lista_vt'): self.load_questions_for_lista_vt()
             else:
                 self.assembly_combobox.set('');
                 if hasattr(self, 'asistencia_asamblea_combo'): self.asistencia_asamblea_combo.set('')
@@ -755,45 +718,43 @@ class App:
 
     # --- Pestaña Asistencia ---
     def setup_asistencia_tab(self):
-        frame = self.asistencia_tab;
-        asamblea_select_frame = ttk.LabelFrame(frame, text="Seleccionar Asamblea", padding=10);
+        frame = self.asistencia_tab
+
+        asamblea_select_frame = ttk.LabelFrame(frame, text="Seleccionar Asamblea", padding=10)
         asamblea_select_frame.pack(padx=10, pady=10, fill="x")
-        ttk.Label(asamblea_select_frame, text="Asamblea:").pack(side=tk.LEFT, padx=5);
-        self.asistencia_asamblea_combo = ttk.Combobox(asamblea_select_frame, state="readonly", width=60);
-        self.asistencia_asamblea_combo.pack(side=tk.LEFT, padx=5);
-        self.asistencia_asamblea_combo.bind("<<ComboboxSelected>>", self.on_asistencia_assembly_selected);
+        ttk.Label(asamblea_select_frame, text="Asamblea:").pack(side=tk.LEFT, padx=5)
+        self.asistencia_asamblea_combo = ttk.Combobox(asamblea_select_frame, state="readonly", width=60)
+        self.asistencia_asamblea_combo.pack(side=tk.LEFT, padx=5)
+        self.asistencia_asamblea_combo.bind("<<ComboboxSelected>>", self.on_asistencia_assembly_selected)
         ttk.Button(asamblea_select_frame, text="Cargar", command=self.load_asistencia_for_assembly).pack(side=tk.LEFT,
                                                                                                          padx=5)
-        list_frame = ttk.LabelFrame(frame, text="Registro Asistencia", padding=10);
-        list_frame.pack(padx=10, pady=10, fill="both", expand=True)
-        columns = ("cedula", "nombre", "tipo", "presente");
-        self.asistencia_tree = ttk.Treeview(list_frame, columns=columns, show="headings");
-        self.asistencia_tree.heading("cedula", text="Cédula");
-        self.asistencia_tree.column("cedula", width=120);
-        self.asistencia_tree.heading("nombre", text="Nombre");
-        self.asistencia_tree.column("nombre", width=250);
-        self.asistencia_tree.heading("tipo", text="Tipo");
-        self.asistencia_tree.column("tipo", width=100);
-        self.asistencia_tree.heading("presente", text="Presente");
-        self.asistencia_tree.column("presente", width=80, anchor=tk.CENTER);
-        self.asistencia_tree.pack(side=tk.LEFT, fill="both", expand=True)
-        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.asistencia_tree.yview);
-        self.asistencia_tree.configure(yscrollcommand=scrollbar.set);
-        scrollbar.pack(side=tk.RIGHT, fill="y")
-        self.asistencia_tree.bind("<Button-1>", self.toggle_asistencia_on_click)
-        add_apod_frame = ttk.LabelFrame(frame, text="Añadir Apoderado a Lista", padding=10);
-        add_apod_frame.pack(padx=10, pady=10, fill="x")
-        ttk.Label(add_apod_frame, text="Cédula Apod.:").grid(row=0, column=0, padx=5, pady=2, sticky="w");
-        self.asistencia_apod_cedula_entry = ttk.Entry(add_apod_frame, width=20);
+
+        # Usar ScrolledFrame para la lista de asistencia
+        self.asistencia_list_scroll_frame = ScrolledFrame(frame)
+        self.asistencia_list_scroll_frame.pack(padx=10, pady=10, fill="both", expand=True)
+        # El frame interior del ScrolledFrame es self.asistencia_list_scroll_frame.interior
+
+        add_apod_frame = ttk.LabelFrame(frame, text="Añadir Apoderado a Lista", padding=10)
+        add_apod_frame.pack(padx=10, pady=10, fill="x") # Este pack está bien, es para el LabelFrame en sí.
+
+        # Widgets dentro de add_apod_frame usando grid
+        ttk.Label(add_apod_frame, text="Cédula Apod.:").grid(row=0, column=0, padx=5, pady=2, sticky="w")
+        self.asistencia_apod_cedula_entry = ttk.Entry(add_apod_frame, width=20)
         self.asistencia_apod_cedula_entry.grid(row=0, column=1, padx=5, pady=2)
-        ttk.Label(add_apod_frame, text="Nombre Apod.:").grid(row=0, column=2, padx=5, pady=2, sticky="w");
-        self.asistencia_apod_nombre_entry = ttk.Entry(add_apod_frame, width=30);
+        ttk.Label(add_apod_frame, text="Nombre Apod.:").grid(row=0, column=2, padx=5, pady=2, sticky="w")
+        self.asistencia_apod_nombre_entry = ttk.Entry(add_apod_frame, width=30)
         self.asistencia_apod_nombre_entry.grid(row=0, column=3, padx=5, pady=2, sticky="ew")
-        ttk.Button(add_apod_frame, text="Añadir", command=self.add_apoderado_to_asistencia).grid(row=0, column=4,
-                                                                                                 padx=10, pady=2);
-        add_apod_frame.grid_columnconfigure(3, weight=1)
-        save_button_frame = ttk.Frame(frame);
-        save_button_frame.pack(pady=10);
+
+        # --- CORRECCIÓN AQUÍ ---
+        # Cambiado .pack() por .grid() para el botón "Añadir"
+        # Se coloca en la siguiente fila (row=1) y abarca las columnas necesarias.
+        ttk.Button(add_apod_frame, text="Añadir", command=self.add_apoderado_to_asistencia_list).grid(row=1, column=0, columnspan=4, padx=10, pady=5, sticky="ew")
+        # ---------------------
+
+        add_apod_frame.grid_columnconfigure(3, weight=1) # Mantenemos la configuración de peso para la columna 3
+
+        save_button_frame = ttk.Frame(frame)
+        save_button_frame.pack(pady=10)
         ttk.Button(save_button_frame, text="Guardar Cambios Asistencia", command=self.save_asistencia_changes).pack()
 
     def on_asistencia_assembly_selected(self, event=None):
@@ -802,21 +763,33 @@ class App:
             try:
                 asamblea_id = int(selection.split(":")[0])
                 if asamblea_id != self.current_assembly_id:
-                    self.assembly_combobox.set(selection)
-                    self.on_assembly_selected()
+                    self.assembly_combobox.set(selection) # Sincroniza con el combobox de la pestaña de Asambleas
+                    self.on_assembly_selected()  # Esto ya debería llamar a load_selected_assembly_details que incluye load_asistencia_for_assembly
                 else:
-                    self.load_asistencia_for_assembly()
+                    self.load_asistencia_for_assembly() # Si es la misma asamblea, solo recargar asistencia
             except (ValueError, IndexError):
                 messagebox.showerror("Error", "Selección inválida.")
 
     def load_asistencia_for_assembly(self, event=None):
-        self.clear_asistencia_list();
+        self.clear_asistencia_list()
         selection = self.asistencia_asamblea_combo.get();
-        if not selection: return
+        if not selection:
+            # Si no hay selección en el combo de asistencia, intentar usar la asamblea actual si existe
+            if self.current_assembly_id:
+                assembly_details = self.execute_query("SELECT id, fecha, descripcion FROM asambleas WHERE id = ?", (self.current_assembly_id,), fetchone=True)
+                if assembly_details:
+                    selection = f"{assembly_details[0]}: {assembly_details[1]} - {assembly_details[2]}"
+                    self.asistencia_asamblea_combo.set(selection) # Actualizar el combo de asistencia
+                else:
+                    return # No se pudo encontrar la asamblea actual
+            else:
+                return # No hay asamblea seleccionada
+
         try:
             asamblea_id = int(selection.split(":")[0])
         except (ValueError, IndexError):
             messagebox.showerror("Error", "Selección inválida."); return
+
         propietarios = self.execute_query("SELECT cedula, nombre FROM propietarios WHERE activo = 1 ORDER BY nombre",
                                           fetchall=True)
         apoderados_poder = self.execute_query(
@@ -824,94 +797,159 @@ class App:
             fetchall=True)
         asistencia_existente = self.execute_query(
             "SELECT cedula_asistente, presente FROM asistencia WHERE asamblea_id = ?", (asamblea_id,), fetchall=True)
-        asistencia_map = {row[0]: row[1] for row in asistencia_existente} if asistencia_existente else {};
-        self.asistencia_data = {}
+        asistencia_map = {row[0]: row[1] for row in asistencia_existente} if asistencia_existente else {}
+
+        self.asistencia_vars = {}
+
+        container = self.asistencia_list_scroll_frame.interior
+
         if propietarios:
-            for cedula, nombre in propietarios: presente_db = asistencia_map.get(cedula,
-                                                                                 0); presente_str = "Sí" if presente_db == 1 else "No"; item_id = self.asistencia_tree.insert(
-                "", "end", values=(cedula, nombre, TIPO_ASISTENTE_PROPIETARIO, presente_str)); self.asistencia_data[
-                item_id] = {'cedula': cedula, 'presente': presente_db, 'tipo': TIPO_ASISTENTE_PROPIETARIO,
-                            'nombre': nombre}
-        apoderados_added = set()
+            for cedula, nombre in propietarios:
+                var = tk.BooleanVar()
+                presente_db = asistencia_map.get(cedula, 0)
+                var.set(presente_db == 1)
+                self.asistencia_vars[cedula] = {'var': var, 'nombre': nombre, 'tipo': TIPO_ASISTENTE_PROPIETARIO}
+                chk = ttk.Checkbutton(container, text=f"{nombre} ({cedula}) - Propietario", variable=var)
+                chk.pack(anchor=tk.W, padx=5, pady=2)
+
+        apoderados_added_cedulas = set()
         if apoderados_poder:
             for cedula_apod, nombre_apod in apoderados_poder:
-                if cedula_apod not in apoderados_added: presente_db = asistencia_map.get(cedula_apod,
-                                                                                         0); presente_str = "Sí" if presente_db == 1 else "No"; item_id = self.asistencia_tree.insert(
-                    "", "end", values=(cedula_apod, nombre_apod, TIPO_ASISTENTE_APODERADO, presente_str));
-                self.asistencia_data[item_id] = {'cedula': cedula_apod, 'presente': presente_db,
-                                                 'tipo': TIPO_ASISTENTE_APODERADO,
-                                                 'nombre': nombre_apod}; apoderados_added.add(cedula_apod)
+                if cedula_apod not in apoderados_added_cedulas and cedula_apod not in self.asistencia_vars:
+                    var = tk.BooleanVar()
+                    presente_db = asistencia_map.get(cedula_apod, 0)
+                    var.set(presente_db == 1)
+                    self.asistencia_vars[cedula_apod] = {'var': var, 'nombre': nombre_apod,
+                                                         'tipo': TIPO_ASISTENTE_APODERADO}
+                    chk = ttk.Checkbutton(container, text=f"{nombre_apod} ({cedula_apod}) - Apoderado (Poder)",
+                                          variable=var)
+                    chk.pack(anchor=tk.W, padx=5, pady=2)
+                    apoderados_added_cedulas.add(cedula_apod)
+
         if asistencia_existente:
             for cedula_asist, presente_db in asistencia_map.items():
-                is_propietario = any(p[0] == cedula_asist for p in propietarios or [])
-                if not is_propietario and cedula_asist not in apoderados_added:
+                if cedula_asist not in self.asistencia_vars:
                     asist_info = self.execute_query(
-                        "SELECT nombre_asistente FROM asistencia WHERE asamblea_id = ? AND cedula_asistente = ?",
+                        "SELECT nombre_asistente, tipo_asistente FROM asistencia WHERE asamblea_id = ? AND cedula_asistente = ?",
                         (asamblea_id, cedula_asist), fetchone=True)
-                    nombre_asist = asist_info[0] if asist_info else "Desconocido";
-                    presente_str = "Sí" if presente_db == 1 else "No";
-                    item_id = self.asistencia_tree.insert("", "end", values=(
-                    cedula_asist, nombre_asist, TIPO_ASISTENTE_APODERADO, presente_str));
-                    self.asistencia_data[item_id] = {'cedula': cedula_asist, 'presente': presente_db,
-                                                     'tipo': TIPO_ASISTENTE_APODERADO, 'nombre': nombre_asist};
-                    apoderados_added.add(cedula_asist)
+                    if asist_info and asist_info[
+                        1] == TIPO_ASISTENTE_APODERADO:
+                        nombre_asist = asist_info[0]
+                        var = tk.BooleanVar()
+                        var.set(presente_db == 1)
+                        self.asistencia_vars[cedula_asist] = {'var': var, 'nombre': nombre_asist,
+                                                              'tipo': TIPO_ASISTENTE_APODERADO}
+                        chk = ttk.Checkbutton(container, text=f"{nombre_asist} ({cedula_asist}) - Apoderado (Manual)",
+                                              variable=var)
+                        chk.pack(anchor=tk.W, padx=5, pady=2)
 
-    def toggle_asistencia_on_click(self, event):
-        region = self.asistencia_tree.identify_region(event.x, event.y)
-        if region != "cell": return
-        item_id = self.asistencia_tree.focus()
-        if not item_id: return
-        if item_id in self.asistencia_data:
-            current_state = self.asistencia_data[item_id]['presente'];
-            new_state = 1 - current_state
-            self.asistencia_data[item_id]['presente'] = new_state
-            presente_str = "Sí" if new_state == 1 else "No"
-            current_values = list(self.asistencia_tree.item(item_id, 'values'));
-            current_values[3] = presente_str
-            self.asistencia_tree.item(item_id, values=tuple(current_values))
-
-    def add_apoderado_to_asistencia(self):
-        cedula_apod = self.asistencia_apod_cedula_entry.get().strip();
+    def add_apoderado_to_asistencia_list(self):
+        cedula_apod = self.asistencia_apod_cedula_entry.get().strip()
         nombre_apod = self.asistencia_apod_nombre_entry.get().strip()
-        if not cedula_apod or not nombre_apod: messagebox.showerror("Error", "Ingrese Cédula y Nombre."); return
-        if any(data['cedula'] == cedula_apod for data in self.asistencia_data.values()): messagebox.showwarning(
-            "Advertencia", "Cédula ya en lista."); return
-        presente_str = "Sí";
-        presente_int = 1
-        item_id = self.asistencia_tree.insert("", "end",
-                                              values=(cedula_apod, nombre_apod, TIPO_ASISTENTE_APODERADO, presente_str))
-        self.asistencia_data[item_id] = {'cedula': cedula_apod, 'presente': presente_int,
-                                         'tipo': TIPO_ASISTENTE_APODERADO, 'nombre': nombre_apod}
-        self.asistencia_apod_cedula_entry.delete(0, tk.END);
-        self.asistencia_apod_nombre_entry.delete(0, tk.END)
+        if not cedula_apod or not nombre_apod:
+            messagebox.showerror("Error", "Ingrese Cédula y Nombre del Apoderado.")
+            return
 
-    def save_asistencia_changes(self):
+        if cedula_apod in self.asistencia_vars:
+            messagebox.showwarning("Advertencia", "Esta cédula ya está en la lista de asistencia.")
+            return
+
+        # Verificar si la asamblea está seleccionada para añadir el apoderado a la BD
         selection = self.asistencia_asamblea_combo.get()
-        if not selection: messagebox.showerror("Error", "Seleccione asamblea."); return
+        if not selection:
+            messagebox.showerror("Error", "Seleccione una asamblea antes de añadir un apoderado.")
+            return
         try:
             asamblea_id = int(selection.split(":")[0])
         except (ValueError, IndexError):
-            messagebox.showerror("Error", "Selección inválida."); return
-        if not self.asistencia_data: messagebox.showinfo("Info", "No hay datos para guardar."); return
-        data_to_save = [(asamblea_id, data['cedula'], data['nombre'], data['tipo'], data['presente']) for data in
-                        self.asistencia_data.values()]
+            messagebox.showerror("Error", "Selección de asamblea inválida.")
+            return
+
+        # Añadir al frame visualmente
+        container = self.asistencia_list_scroll_frame.interior
+        var = tk.BooleanVar()
+        var.set(True)
+        self.asistencia_vars[cedula_apod] = {'var': var, 'nombre': nombre_apod, 'tipo': TIPO_ASISTENTE_APODERADO}
+        chk = ttk.Checkbutton(container, text=f"{nombre_apod} ({cedula_apod}) - Apoderado (Añadido)", variable=var)
+        chk.pack(anchor=tk.W, padx=5, pady=2)
+
+        # Aquí podrías añadirlo directamente a la tabla 'asistencia' si quieres que se persista
+        # inmediatamente, o esperar a "Guardar Cambios Asistencia".
+        # Por ahora, solo se añade a la lista visual y al diccionario self.asistencia_vars.
+        # Si se quiere persistir inmediatamente:
+        # try:
+        #     self.execute_query(
+        #         "INSERT OR IGNORE INTO asistencia (asamblea_id, cedula_asistente, nombre_asistente, tipo_asistente, presente) VALUES (?, ?, ?, ?, 1)",
+        #         (asamblea_id, cedula_apod, nombre_apod, TIPO_ASISTENTE_APODERADO), commit=True
+        #     )
+        #     self.log_import_message(f"Apoderado {nombre_apod} ({cedula_apod}) añadido a la asistencia de la asamblea {asamblea_id}.") # Necesitarías un log si lo usas
+        # except sqlite3.Error as e:
+        #     messagebox.showerror("Error DB", f"No se pudo añadir el apoderado a la base de datos: {e}")
+        #     # Revertir la adición visual si falla la BD
+        #     chk.destroy()
+        #     del self.asistencia_vars[cedula_apod]
+        #     return
+
+
+        self.asistencia_apod_cedula_entry.delete(0, tk.END)
+        self.asistencia_apod_nombre_entry.delete(0, tk.END)
+        messagebox.showinfo("Apoderado Añadido", f"Apoderado {nombre_apod} añadido a la lista. Recuerde guardar los cambios.")
+
+
+    def save_asistencia_changes(self):
+        selection = self.asistencia_asamblea_combo.get()
+        if not selection: messagebox.showerror("Error", "Seleccione una asamblea."); return
+        try:
+            asamblea_id = int(selection.split(":")[0])
+        except (ValueError, IndexError):
+            messagebox.showerror("Error", "Selección de asamblea inválida."); return
+
+        if not self.asistencia_vars: messagebox.showinfo("Información",
+                                                         "No hay datos de asistencia para guardar."); return
+
+        data_to_save = []
+        for cedula, data in self.asistencia_vars.items():
+            data_to_save.append((
+                asamblea_id,
+                cedula,
+                data['nombre'],
+                data['tipo'],
+                1 if data['var'].get() else 0
+            ))
+
         conn = sqlite3.connect(DB_NAME);
         conn.execute("PRAGMA foreign_keys = ON");
         cursor = conn.cursor()
         try:
+            # Primero, eliminamos la asistencia existente para esta asamblea para evitar duplicados o conflictos
+            # si un apoderado fue añadido manualmente y luego se le asigna un poder, etc.
+            # Opcionalmente, podrías hacer un DELETE selectivo solo para los que ya no están o cambiaron.
+            # Por simplicidad, un borrado y re-inserción es más robusto aquí.
+            # cursor.execute("DELETE FROM asistencia WHERE asamblea_id = ?", (asamblea_id,))
+
+            # Usamos INSERT OR REPLACE para manejar tanto nuevos como existentes.
+            # Si un asistente ya existe para esa asamblea y cédula, se actualiza.
+            # Si no existe, se inserta.
             cursor.executemany(
                 "INSERT OR REPLACE INTO asistencia (asamblea_id, cedula_asistente, nombre_asistente, tipo_asistente, presente) VALUES (?, ?, ?, ?, ?)",
                 data_to_save)
             conn.commit();
-            messagebox.showinfo("Éxito", f"Asistencia para asamblea {asamblea_id} guardada.")
+            messagebox.showinfo("Éxito", f"Asistencia para la asamblea {asamblea_id} guardada.")
         except sqlite3.Error as e:
-            conn.rollback(); messagebox.showerror("Error DB", f"No se pudo guardar: {e}")
+            conn.rollback(); messagebox.showerror("Error DB", f"No se pudo guardar la asistencia: {e}")
         finally:
             conn.close()
         self.load_asistencia_for_assembly()
 
+    def clear_asistencia_list(self):
+        if hasattr(self, 'asistencia_list_scroll_frame'):
+            for widget in self.asistencia_list_scroll_frame.interior.winfo_children():
+                widget.destroy()
+        self.asistencia_vars = {}
+
     # --- Pestaña Votación ---
     def setup_voting_tab(self):
+        # (Sin cambios UI)
         frame = self.voting_tab;
         question_select_frame = ttk.LabelFrame(frame, text="Seleccionar Pregunta", padding=10);
         question_select_frame.pack(padx=10, pady=10, fill="x")
@@ -945,6 +983,7 @@ class App:
         self.results_canvas_widget = None
 
     def load_questions_for_voting_tab(self):
+        # (Sin cambios)
         if not self.current_assembly_id: self.voting_question_combobox[
             'values'] = []; self.voting_question_combobox.set(''); self.clear_voting_area(); return
         questions = self.execute_query("SELECT id, texto_pregunta FROM preguntas WHERE asamblea_id = ? ORDER BY id",
@@ -960,6 +999,7 @@ class App:
                 ''); self.clear_voting_area()
 
     def clear_voting_area(self):
+        # (Sin cambios)
         self.current_question_id = None;
         self.current_question_options = []
         if hasattr(self, 'active_question_label'): self.active_question_label.config(text="Pregunta Activa: Ninguna")
@@ -975,6 +1015,7 @@ class App:
                 if widget != self.results_canvas_widget: widget.destroy()
 
     def on_voting_question_selected_for_display(self, event=None):
+        # (Sin cambios)
         selection = self.voting_question_combobox.get()
         if selection:
             try:
@@ -988,6 +1029,7 @@ class App:
                 messagebox.showerror("Error", "Selección inválida.")
 
     def update_vote_options_ui(self, question_id, for_display_only=False):
+        # (Sin cambios)
         if hasattr(self, 'options_radio_frame') and self.options_radio_frame.winfo_exists():
             for widget in self.options_radio_frame.winfo_children(): widget.destroy()
         self.current_question_options = []
@@ -1024,12 +1066,10 @@ class App:
                                                                         "Pregunta ya está cerrada."); return
         if q_info[0] == ESTADO_PREGUNTA_ACTIVA: messagebox.showinfo("Info", "Pregunta ya está activa."); return
 
-        # 1. Obtener unidades/votantes elegibles y presentes
-        eligible_info = self._get_eligible_voters_info()  # Lista de dicts con id_unidad
+        eligible_info = self._get_eligible_voters_info()
         if not eligible_info:
             messagebox.showwarning("Sin Votantes", "No hay votantes elegibles presentes para esta asamblea.")
 
-        # 2. Insertar 'No Votó' inicial para cada unidad elegible
         initial_votes_to_insert = []
         for voter_unit in eligible_info:
             initial_votes_to_insert.append((
@@ -1056,7 +1096,6 @@ class App:
         finally:
             conn.close()
 
-        # 3. Marcar pregunta como activa y actualizar UI
         if self.current_question_id is not None and self.current_question_id != new_active_question_id:
             self.execute_query("UPDATE preguntas SET estado = ? WHERE id = ? AND asamblea_id = ?",
                                (ESTADO_PREGUNTA_CERRADA, self.current_question_id, self.current_assembly_id),
@@ -1084,7 +1123,6 @@ class App:
                                     fetchone=True);
         question_text_closed = q_info[0] if q_info else f"ID {question_id_to_close}"
 
-        # Marcar pregunta como cerrada
         self.execute_query("UPDATE preguntas SET estado = ? WHERE id = ?",
                            (ESTADO_PREGUNTA_CERRADA, question_id_to_close,), commit=True);
         self.load_questions_for_assembly()
@@ -1439,45 +1477,74 @@ class App:
         filepath = self.excel_file_path.get();
         if not filepath or filepath == "Ningún archivo seleccionado": messagebox.showerror("Error",
                                                                                            "Selecciona archivo Excel."); return
-        sheet = self.sheet_name_var.get().strip() or None;
+        sheet_name_input = self.sheet_name_var.get().strip()
+
         col_cedula = self.col_cedula_var.get().strip();
         col_nombre_prop = self.col_nombre_prop_var.get().strip();
         col_celular = self.col_celular_var.get().strip();
         col_unidad = self.col_unidad_var.get().strip();
         col_coef = self.col_coeficiente_var.get().strip()
-        if not col_cedula or not col_nombre_prop or not col_unidad or not col_coef: messagebox.showerror("Error Mapeo",
-                                                                                                         "Columnas Cédula, Nombre Prop., Unidad y Coeficiente obligatorias."); return
+
+        if not col_cedula or not col_nombre_prop or not col_unidad or not col_coef:
+            messagebox.showerror("Error Mapeo",
+                                 "Columnas Cédula, Nombre Prop., Unidad y Coeficiente son obligatorias.");
+            return
+
         self.log_import_message(f"--- Iniciando importación desde {os.path.basename(filepath)} ---")
+
         try:
-            df = pd.read_excel(filepath, sheet_name=sheet, dtype=str);
+            excel_data = pd.read_excel(filepath, sheet_name=sheet_name_input if sheet_name_input else None, dtype=str)
+            df = None
+            if isinstance(excel_data, dict):
+                if not excel_data:
+                    messagebox.showerror("Error Excel", "El archivo Excel está vacío o no contiene hojas.")
+                    self.log_import_message("ERROR: El archivo Excel está vacío o no contiene hojas.")
+                    return
+                first_sheet_name = list(excel_data.keys())[0]
+                df = excel_data[first_sheet_name]
+                self.log_import_message(f"Múltiples hojas encontradas. Usando la primera: '{first_sheet_name}'.")
+            else:
+                df = excel_data
+
             df = df.fillna('')
-            self.log_import_message(f"Archivo leído. {len(df)} filas.");
+            self.log_import_message(f"Archivo/Hoja leída. {len(df)} filas encontradas.")
+
             required_cols = {col_cedula, col_nombre_prop, col_unidad, col_coef};
             if col_celular: required_cols.add(col_celular)
             missing_cols = required_cols - set(df.columns)
-            if missing_cols: messagebox.showerror("Error Columnas",
-                                                  f"Columnas no encontradas: {', '.join(missing_cols)}"); self.log_import_message(
-                f"ERROR: Columnas faltantes: {', '.join(missing_cols)}"); return
+            if missing_cols:
+                messagebox.showerror("Error Columnas", f"Columnas no encontradas: {', '.join(missing_cols)}");
+                self.log_import_message(f"ERROR: Columnas faltantes: {', '.join(missing_cols)}");
+                return
+
             conn = sqlite3.connect(DB_NAME);
+            conn.execute("PRAGMA foreign_keys = ON");
             cursor = conn.cursor();
             props_added = 0;
             props_skipped = 0;
             unidades_added = 0;
             unidades_skipped = 0;
             errors = 0
+
             for index, row in df.iterrows():
                 cedula = str(row[col_cedula]).strip();
                 nombre = str(row[col_nombre_prop]).strip();
-                celular = str(row[col_celular]).strip() if col_celular else "";
+                celular = str(row[col_celular]).strip() if col_celular and col_celular in row else "";
                 unidad = str(row[col_unidad]).strip();
                 coef_str = str(row[col_coef]).strip().replace(',', '.')
-                if not cedula or not nombre or not unidad or not coef_str: self.log_import_message(
-                    f"FILA {index + 2} OMITIDA: Faltan datos."); errors += 1; continue
+
+                if not cedula or not nombre or not unidad or not coef_str:
+                    self.log_import_message(f"FILA {index + 2} OMITIDA: Faltan datos.");
+                    errors += 1;
+                    continue
                 try:
                     coef = float(coef_str)
                 except ValueError:
                     self.log_import_message(
-                        f"FILA {index + 2} OMITIDA: Coef '{coef_str}' inválido (Unidad '{unidad}')."); errors += 1; continue
+                        f"FILA {index + 2} OMITIDA: Coef '{coef_str}' inválido (Unidad '{unidad}').");
+                    errors += 1;
+                    continue
+
                 try:
                     cursor.execute(
                         "INSERT OR IGNORE INTO propietarios (cedula, nombre, celular, activo) VALUES (?, ?, ?, 1)",
@@ -1487,8 +1554,10 @@ class App:
                     else:
                         props_skipped += 1
                 except sqlite3.IntegrityError as e:
-                    self.log_import_message(
-                        f"FILA {index + 2} ERROR PROP: {e} (Céd: {cedula}, Cel: {celular})"); errors += 1; continue
+                    self.log_import_message(f"FILA {index + 2} ERROR PROP: {e} (Céd: {cedula}, Cel: {celular})");
+                    errors += 1;
+                    continue
+
                 try:
                     cursor.execute(
                         "INSERT OR IGNORE INTO unidades (nombre_unidad, coeficiente, cedula_propietario) VALUES (?, ?, ?)",
@@ -1499,7 +1568,9 @@ class App:
                         unidades_skipped += 1
                 except sqlite3.Error as e:
                     self.log_import_message(
-                        f"FILA {index + 2} ERROR UNIDAD: {e} (Unidad: {unidad}, Céd Prop: {cedula})"); errors += 1;
+                        f"FILA {index + 2} ERROR UNIDAD: {e} (Unidad: {unidad}, Céd Prop: {cedula})");
+                    errors += 1;
+
             conn.commit();
             conn.close()
             summary = f"--- Fin Importación ---\nProp. Nuevos: {props_added}\nProp. Omitidos: {props_skipped}\nUnidades Nuevas: {unidades_added}\nUnidades Omitidas: {unidades_skipped}\nErrores/Omitidos: {errors}"
