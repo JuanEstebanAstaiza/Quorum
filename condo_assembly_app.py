@@ -96,16 +96,31 @@ def init_app_dirs_and_db():
         '''CREATE TABLE IF NOT EXISTS preguntas (id INTEGER PRIMARY KEY AUTOINCREMENT, asamblea_id INTEGER NOT NULL, texto_pregunta TEXT NOT NULL, opciones_configuradas TEXT, estado TEXT DEFAULT 'inactiva', FOREIGN KEY (asamblea_id) REFERENCES asambleas(id) ON DELETE CASCADE)''')
     cursor.execute(
         '''CREATE TABLE IF NOT EXISTS votos (id INTEGER PRIMARY KEY AUTOINCREMENT, pregunta_id INTEGER NOT NULL, id_unidad_representada INTEGER NOT NULL, cedula_ejecuta_voto TEXT, opcion_elegida TEXT NOT NULL, FOREIGN KEY (pregunta_id) REFERENCES preguntas(id) ON DELETE CASCADE, FOREIGN KEY (id_unidad_representada) REFERENCES unidades(id_unidad) ON DELETE CASCADE, UNIQUE (pregunta_id, id_unidad_representada))''')
-    cursor.execute("PRAGMA foreign_keys = ON")
-    conn.commit();
-    conn.close()
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        print(f"DEBUG: Conectado a DB: {DB_NAME}")
+        cursor.execute(
+            '''CREATE TABLE IF NOT EXISTS propietarios (cedula TEXT PRIMARY KEY, nombre TEXT NOT NULL, celular TEXT UNIQUE, activo INTEGER DEFAULT 1)''')
+        print("DEBUG: Tabla 'propietarios' verificada/creada.")
+        # ... (otras tablas) ...
+        cursor.execute("PRAGMA foreign_keys = ON")
+        conn.commit()
+        print("DEBUG: Commit realizado y conexión cerrada.")
+    except sqlite3.Error as e:
+        print(f"ERROR CRÍTICO en init_app_dirs_and_db: {e}")
+        messagebox.showerror("Error Crítico DB", f"No se pudo inicializar la base de datos: {e}")
+        raise  # Re-lanzar la excepción puede ser útil para detener la app si la DB falla
+    finally:
+        if conn:
+            conn.close()
 
 
 # --- Clases de la Aplicación ---
 class App:
     def __init__(self, root):
         self.root = root;
-        self.root.title("Gestión Asambleas Condominio v11");
+        self.root.title("Gestión Asambleas Condominio v12 - Poderes Mejorados");  # Título actualizado
         self.root.geometry("1250x850")
         style = ttk.Style();
         style.theme_use('clam')
@@ -113,8 +128,12 @@ class App:
         self.current_question_id = None
         self.current_question_options = [];
         self.editing_question_id = None
-        self.asistencia_vars = {}  # {cedula_asistente: tk.BooleanVar()}
+        self.asistencia_vars = {}
         self.excel_file_path = tk.StringVar()
+
+        self.tipo_apoderado_var = tk.StringVar(value="tercero")  # Variable para radio buttons
+        self.notebook = ttk.Notebook(root)  # Asegurar que se crea una sola vez
+        self._processed_eligible_voters_info = []  # Para la nueva lógica de votación
 
         self.notebook = ttk.Notebook(root)
 
@@ -126,16 +145,16 @@ class App:
         self.setup_unidad_tab()
         self.asamblea_tab = ttk.Frame(self.notebook);
         self.notebook.add(self.asamblea_tab, text='Asambleas/Poderes');
-        self.setup_asamblea_tab()
+        self.setup_asamblea_tab() # MODIFICADO
         self.asistencia_tab = ttk.Frame(self.notebook);
         self.notebook.add(self.asistencia_tab, text='Asistencia');
         self.setup_asistencia_tab()
         self.voting_tab = ttk.Frame(self.notebook);
         self.notebook.add(self.voting_tab, text='Votación');
-        self.setup_voting_tab()
+        self.setup_voting_tab() # MODIFICADO (internamente por las llamadas a _get_eligible_voters_info)
         self.lista_vt_tab = ttk.Frame(self.notebook);
         self.notebook.add(self.lista_vt_tab, text='Lista Votación');
-        self.setup_lista_vt_tab()
+        self.setup_lista_vt_tab() # MODIFICADO
         self.import_tab = ttk.Frame(self.notebook);
         self.notebook.add(self.import_tab, text='Importar Excel');
         self.setup_import_tab()
@@ -268,8 +287,85 @@ class App:
         props = self.execute_query("SELECT cedula, nombre FROM propietarios WHERE activo = 1 ORDER BY nombre",
                                    fetchall=True)
         prop_list = [f"{p[0]}: {p[1]}" for p in props] if props else []
-        if hasattr(self, 'unidad_propietario_combo'): self.unidad_propietario_combo[
-            'values'] = prop_list; self.unidad_propietario_combo.set('')
+
+        if hasattr(self, 'unidad_propietario_combo'):
+            current_value = self.unidad_propietario_combo.get()
+            self.unidad_propietario_combo['values'] = prop_list
+            if current_value in prop_list:
+                self.unidad_propietario_combo.set(current_value)
+            elif prop_list:
+                pass  # No establecer ninguno por defecto si el actual no está
+            else:
+                self.unidad_propietario_combo.set('')
+                # NUEVO CAMBIO: Actualizar el combobox de propietarios apoderados
+                if hasattr(self, 'poder_propietario_apoderado_combo'):
+                    current_value_apod = self.poder_propietario_apoderado_combo.get()
+                    self.poder_propietario_apoderado_combo['values'] = prop_list
+                    if current_value_apod in prop_list:
+                        self.poder_propietario_apoderado_combo.set(current_value_apod)
+                    elif prop_list:
+                        pass  # No establecer ninguno por defecto
+                    else:
+                        self.poder_propietario_apoderado_combo.set('')
+
+        def toggle_apoderado_fields(self):
+            tipo = self.tipo_apoderado_var.get()
+            if tipo == "tercero":
+                self.tercero_fields_frame.grid(row=2, column=0, columnspan=4, sticky="ew",
+                                               pady=2)  # Mostrar frame de tercero
+                self.propietario_apoderado_fields_frame.grid_remove()  # Ocultar frame de propietario apoderado
+                self.poder_cedula_apod_entry.config(state='normal')
+                self.poder_nombre_apod_entry.config(state='normal')
+                if hasattr(self, 'poder_propietario_apoderado_combo'):  # Chequeo de existencia
+                    self.poder_propietario_apoderado_combo.config(state='disabled')
+                    self.poder_propietario_apoderado_combo.set('')
+            elif tipo == "propietario":
+                self.tercero_fields_frame.grid_remove()  # Ocultar frame de tercero
+                self.propietario_apoderado_fields_frame.grid(row=2, column=0, columnspan=4, sticky="ew",
+                                                             pady=2)  # Mostrar frame de propietario apoderado
+                self.poder_cedula_apod_entry.config(state='disabled')
+                self.poder_nombre_apod_entry.config(state='disabled')
+                self.poder_cedula_apod_entry.delete(0, tk.END)
+                self.poder_nombre_apod_entry.delete(0, tk.END)
+                if hasattr(self, 'poder_propietario_apoderado_combo'):  # Chequeo de existencia
+                    self.poder_propietario_apoderado_combo.config(state='readonly')  # Usar readonly para combobox
+
+            # Llamar a update_propietario_comboboxes solo si el combobox existe
+            if hasattr(self, 'poder_propietario_apoderado_combo'):
+                self.update_propietario_comboboxes()  # Para asegurar que el combo de apoderados propietarios esté actualizado
+
+        # NUEVO CAMBIO: Actualizar el combobox de propietarios apoderados
+        if hasattr(self, 'poder_propietario_apoderado_combo'):
+            current_value_apod = self.poder_propietario_apoderado_combo.get()
+            self.poder_propietario_apoderado_combo['values'] = prop_list
+            if current_value_apod in prop_list:
+                self.poder_propietario_apoderado_combo.set(current_value_apod)
+            elif prop_list:
+                pass  # No establecer ninguno por defecto
+            else:
+                self.poder_propietario_apoderado_combo.set('')
+
+    # NUEVO CAMBIO: Método para alternar la visibilidad/estado de los campos de apoderado
+    def toggle_apoderado_fields(self):
+        tipo = self.tipo_apoderado_var.get()
+        if tipo == "tercero":
+            self.tercero_fields_frame.grid(row=2, column=0, columnspan=4, sticky="ew",
+                                           pady=2)  # Mostrar frame de tercero
+            self.propietario_apoderado_fields_frame.grid_remove()  # Ocultar frame de propietario apoderado
+            self.poder_cedula_apod_entry.config(state='normal')
+            self.poder_nombre_apod_entry.config(state='normal')
+            self.poder_propietario_apoderado_combo.config(state='disabled')
+            self.poder_propietario_apoderado_combo.set('')
+        elif tipo == "propietario":
+            self.tercero_fields_frame.grid_remove()  # Ocultar frame de tercero
+            self.propietario_apoderado_fields_frame.grid(row=2, column=0, columnspan=4, sticky="ew",
+                                                         pady=2)  # Mostrar frame de propietario apoderado
+            self.poder_cedula_apod_entry.config(state='disabled')
+            self.poder_nombre_apod_entry.config(state='disabled')
+            self.poder_cedula_apod_entry.delete(0, tk.END)
+            self.poder_nombre_apod_entry.delete(0, tk.END)
+            self.poder_propietario_apoderado_combo.config(state='readonly')  # Usar readonly para combobox
+        self.update_propietario_comboboxes()  # Para asegurar que el combo de apoderados propietarios esté actualizado
 
     def toggle_propietario_activation(self):
         selected = self.propietario_tree.focus();
@@ -438,39 +534,140 @@ class App:
         ttk.Button(assembly_selection_frame, text="Crear Asamblea", command=self.create_assembly).grid(row=2, column=0,
                                                                                                        columnspan=2,
                                                                                                        pady=10)
+
         assembly_list_frame = ttk.LabelFrame(frame, text="Asambleas Existentes", padding=10);
         assembly_list_frame.pack(padx=10, pady=10, fill="x");
         self.assembly_combobox = ttk.Combobox(assembly_list_frame, state="readonly", width=65);
         self.assembly_combobox.pack(side=tk.LEFT, padx=5);
         self.assembly_combobox.bind("<<ComboboxSelected>>", self.on_assembly_selected)
-        powers_frame = ttk.LabelFrame(frame, text="Gestión Poderes", padding=10);
+
+        powers_frame = ttk.LabelFrame(frame, text="Gestión Poderes", padding=10)
         powers_frame.pack(padx=10, pady=10, fill="x")
-        ttk.Label(powers_frame, text="Unidad da poder:").grid(row=0, column=0, padx=5, pady=5, sticky="w");
-        self.poder_unidad_combo = ttk.Combobox(powers_frame, state="readonly", width=40);
-        self.poder_unidad_combo.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Label(powers_frame, text="Cédula Apoderado:").grid(row=1, column=0, padx=5, pady=5, sticky="w");
-        self.poder_cedula_apod_entry = ttk.Entry(powers_frame, width=40);
-        self.poder_cedula_apod_entry.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Label(powers_frame, text="Nombre Apoderado:").grid(row=2, column=0, padx=5, pady=5, sticky="w");
-        self.poder_nombre_apod_entry = ttk.Entry(powers_frame, width=40);
-        self.poder_nombre_apod_entry.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
-        ttk.Button(powers_frame, text="Asignar Poder", command=self.assign_proxy).grid(row=3, column=0, columnspan=2,
-                                                                                       pady=10)
-        self.powers_tree = ttk.Treeview(powers_frame, columns=("id_p", "unidad", "propietario", "ced_apod", "nom_apod"),
-                                        show="headings", height=4);
+
+        ttk.Label(powers_frame, text="Unidad da poder:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.poder_unidad_combo = ttk.Combobox(powers_frame, state="readonly", width=40)
+        self.poder_unidad_combo.grid(row=0, column=1, columnspan=3, padx=5, pady=5, sticky="ew")
+
+        # NUEVO CAMBIO: Radio buttons para seleccionar tipo de apoderado
+        tipo_apoderado_frame = ttk.Frame(powers_frame)
+        tipo_apoderado_frame.grid(row=1, column=0, columnspan=4, pady=5,
+                                  sticky="w")  # Ajustar columnspan si es necesario
+        ttk.Label(tipo_apoderado_frame, text="Tipo Apoderado:").pack(side=tk.LEFT, padx=5)
+        self.radio_tercero = ttk.Radiobutton(tipo_apoderado_frame, text="Tercero", variable=self.tipo_apoderado_var,
+                                             value="tercero", command=self.toggle_apoderado_fields)
+        self.radio_tercero.pack(side=tk.LEFT, padx=5)
+        self.radio_propietario = ttk.Radiobutton(tipo_apoderado_frame, text="Propietario Existente",
+                                                 variable=self.tipo_apoderado_var, value="propietario",
+                                                 command=self.toggle_apoderado_fields)
+        self.radio_propietario.pack(side=tk.LEFT, padx=5)
+
+        # Campos para apoderado TERCERO (inicialmente visibles o gestionados por toggle_apoderado_fields)
+        self.tercero_fields_frame = ttk.Frame(powers_frame)
+        # .grid() se maneja en toggle_apoderado_fields
+        ttk.Label(self.tercero_fields_frame, text="Cédula Apoderado (Tercero):").grid(row=0, column=0, padx=5, pady=2,
+                                                                                      sticky="w")
+        self.poder_cedula_apod_entry = ttk.Entry(self.tercero_fields_frame, width=38)
+        self.poder_cedula_apod_entry.grid(row=0, column=1, padx=5, pady=2, sticky="ew")
+        ttk.Label(self.tercero_fields_frame, text="Nombre Apoderado (Tercero):").grid(row=1, column=0, padx=5, pady=2,
+                                                                                      sticky="w")
+        self.poder_nombre_apod_entry = ttk.Entry(self.tercero_fields_frame, width=38)
+        self.poder_nombre_apod_entry.grid(row=1, column=1, padx=5, pady=2, sticky="ew")
+        self.tercero_fields_frame.grid_columnconfigure(1, weight=1)
+
+        # NUEVO CAMBIO: Combobox para seleccionar PROPIETARIO como apoderado
+        self.propietario_apoderado_fields_frame = ttk.Frame(powers_frame)
+        # .grid() se maneja en toggle_apoderado_fields
+        ttk.Label(self.propietario_apoderado_fields_frame, text="Seleccionar Propietario Apoderado:").grid(row=0,
+                                                                                                           column=0,
+                                                                                                           padx=5,
+                                                                                                           pady=2,
+                                                                                                           sticky="w")
+        self.poder_propietario_apoderado_combo = ttk.Combobox(self.propietario_apoderado_fields_frame, state="disabled",
+                                                              width=38)  # Inicia deshabilitado
+        self.poder_propietario_apoderado_combo.grid(row=0, column=1, padx=5, pady=2, sticky="ew")
+        self.propietario_apoderado_fields_frame.grid_columnconfigure(1, weight=1)
+
+        # Ajustar el botón de Asignar Poder y la tabla de poderes
+        ttk.Button(powers_frame, text="Asignar Poder", command=self.assign_proxy).grid(row=3, column=0, columnspan=4,
+                                                                                       pady=10)  # Ajustado columnspan
+
+        self.powers_tree = ttk.Treeview(powers_frame,
+                                        columns=("id_p", "unidad", "propietario_da_poder", "ced_apod", "nom_apod"),
+                                        # Cambiado nombre de columna
+                                        show="headings", height=4)
         self.powers_tree.heading("id_p", text="ID");
-        self.powers_tree.column("id_p", width=30);
-        self.powers_tree.heading("unidad", text="Unidad");
-        self.powers_tree.column("unidad", width=100);
-        self.powers_tree.heading("propietario", text="Propietario");
-        self.powers_tree.column("propietario", width=150);
-        self.powers_tree.heading("ced_apod", text="Céd. Apod.");
-        self.powers_tree.column("ced_apod", width=100);
-        self.powers_tree.heading("nom_apod", text="Nom. Apod.");
-        self.powers_tree.column("nom_apod", width=150);
-        self.powers_tree.grid(row=4, column=0, columnspan=2, pady=5, sticky="ew");
-        ttk.Button(powers_frame, text="Eliminar Poder", command=self.delete_proxy).grid(row=5, column=0, columnspan=2,
-                                                                                        pady=5)
+        self.powers_tree.column("id_p", width=30)
+        self.powers_tree.heading("unidad", text="Unidad Otorga");
+        self.powers_tree.column("unidad", width=120)  # Texto cabecera
+        self.powers_tree.heading("propietario_da_poder", text="Propietario Otorga");
+        self.powers_tree.column("propietario_da_poder", width=150)  # Texto cabecera
+        self.powers_tree.heading("ced_apod", text="Céd. Apoderado");
+        self.powers_tree.column("ced_apod", width=100)
+        self.powers_tree.heading("nom_apod", text="Nom. Apoderado");
+        self.powers_tree.column("nom_apod", width=150)
+        self.powers_tree.grid(row=4, column=0, columnspan=4, pady=5, sticky="ew")  # Ajustado columnspan
+        ttk.Button(powers_frame, text="Eliminar Poder", command=self.delete_proxy).grid(row=5, column=0, columnspan=4,
+                                                                                        pady=5)  # Ajustado columnspan
+
+        self.toggle_apoderado_fields()  # Llamar para establecer el estado inicial correcto
+
+        # NUEVO CAMBIO: Radio buttons para seleccionar tipo de apoderado
+        tipo_apoderado_frame = ttk.Frame(powers_frame)
+        tipo_apoderado_frame.grid(row=1, column=0, columnspan=4, pady=5, sticky="w")
+        ttk.Label(tipo_apoderado_frame, text="Tipo Apoderado:").pack(side=tk.LEFT, padx=5)
+        self.radio_tercero = ttk.Radiobutton(tipo_apoderado_frame, text="Tercero", variable=self.tipo_apoderado_var,
+                                             value="tercero", command=self.toggle_apoderado_fields)
+        self.radio_tercero.pack(side=tk.LEFT, padx=5)
+        self.radio_propietario = ttk.Radiobutton(tipo_apoderado_frame, text="Propietario Existente",
+                                                 variable=self.tipo_apoderado_var, value="propietario",
+                                                 command=self.toggle_apoderado_fields)
+        self.radio_propietario.pack(side=tk.LEFT, padx=5)
+
+        # Campos para apoderado TERCERO (inicialmente visibles)
+        self.tercero_fields_frame = ttk.Frame(powers_frame)
+        self.tercero_fields_frame.grid(row=2, column=0, columnspan=4, sticky="ew")
+        ttk.Label(self.tercero_fields_frame, text="Cédula Apoderado (Tercero):").grid(row=0, column=0, padx=5, pady=2,
+                                                                                      sticky="w")
+        self.poder_cedula_apod_entry = ttk.Entry(self.tercero_fields_frame, width=38)  # Ajustar width si es necesario
+        self.poder_cedula_apod_entry.grid(row=0, column=1, padx=5, pady=2, sticky="ew")
+        ttk.Label(self.tercero_fields_frame, text="Nombre Apoderado (Tercero):").grid(row=1, column=0, padx=5, pady=2,
+                                                                                      sticky="w")
+        self.poder_nombre_apod_entry = ttk.Entry(self.tercero_fields_frame, width=38)
+        self.poder_nombre_apod_entry.grid(row=1, column=1, padx=5, pady=2, sticky="ew")
+        self.tercero_fields_frame.grid_columnconfigure(1, weight=1)
+
+        # NUEVO CAMBIO: Combobox para seleccionar PROPIETARIO como apoderado (inicialmente oculto/deshabilitado)
+        self.propietario_apoderado_fields_frame = ttk.Frame(powers_frame)
+        # No se hace .grid() aquí, se maneja en toggle_apoderado_fields
+        ttk.Label(self.propietario_apoderado_fields_frame, text="Seleccionar Propietario Apoderado:").grid(row=0,
+                                                                                                           column=0,
+                                                                                                           padx=5,
+                                                                                                           pady=2,
+                                                                                                           sticky="w")
+        self.poder_propietario_apoderado_combo = ttk.Combobox(self.propietario_apoderado_fields_frame, state="readonly",
+                                                              width=38)
+        self.poder_propietario_apoderado_combo.grid(row=0, column=1, padx=5, pady=2, sticky="ew")
+        self.propietario_apoderado_fields_frame.grid_columnconfigure(1, weight=1)
+
+        ttk.Button(powers_frame, text="Asignar Poder", command=self.assign_proxy).grid(row=3, column=0, columnspan=4,
+                                                                                       pady=10)  # Ajustado columnspan
+
+        self.powers_tree = ttk.Treeview(powers_frame,
+                                        columns=("id_p", "unidad", "propietario_da_poder", "ced_apod", "nom_apod"),
+                                        show="headings", height=4)  # Cambiado nombre de columna
+        self.powers_tree.heading("id_p", text="ID");
+        self.powers_tree.column("id_p", width=30)
+        self.powers_tree.heading("unidad", text="Unidad Otorga");
+        self.powers_tree.column("unidad", width=120)  # Texto cabecera
+        self.powers_tree.heading("propietario_da_poder", text="Propietario Otorga");
+        self.powers_tree.column("propietario_da_poder", width=150)  # Texto cabecera
+        self.powers_tree.heading("ced_apod", text="Céd. Apoderado");
+        self.powers_tree.column("ced_apod", width=100)
+        self.powers_tree.heading("nom_apod", text="Nom. Apoderado");
+        self.powers_tree.column("nom_apod", width=150)
+        self.powers_tree.grid(row=4, column=0, columnspan=4, pady=5, sticky="ew")  # Ajustado columnspan
+        ttk.Button(powers_frame, text="Eliminar Poder", command=self.delete_proxy).grid(row=5, column=0, columnspan=4, pady=5)
+        self.toggle_apoderado_fields()
         questions_frame = ttk.LabelFrame(frame, text="Preguntas Asamblea", padding=10);
         questions_frame.pack(padx=10, pady=10, fill="both", expand=True)
         question_entry_frame = ttk.Frame(questions_frame);
@@ -488,7 +685,7 @@ class App:
         ttk.Button(question_button_frame, text="Guardar Pregunta", command=self.save_question).pack(side=tk.LEFT,
                                                                                                     padx=5);
         ttk.Button(question_button_frame, text="Nueva (Limpiar)", command=self.clear_question_fields).pack(side=tk.LEFT,
-                                                                                                           padx=5)  # Ajustado aquí
+                                                                                                           padx=5)
         question_list_frame = ttk.Frame(questions_frame);
         question_list_frame.pack(fill="both", expand=True, pady=5)
         self.questions_tree = ttk.Treeview(question_list_frame,
@@ -666,42 +863,110 @@ class App:
         self.load_questions_for_voting_tab()
 
     def assign_proxy(self):
-        if not self.current_assembly_id: messagebox.showerror("Error", "Seleccione asamblea."); return
-        unidad_selection = self.poder_unidad_combo.get();
-        cedula_apoderado = self.poder_cedula_apod_entry.get().strip();
-        nombre_apoderado = self.poder_nombre_apod_entry.get().strip()
-        if not unidad_selection or not cedula_apoderado or not nombre_apoderado: messagebox.showerror("Error",
-                                                                                                      "Seleccione Unidad y complete datos Apoderado."); return
+        if not self.current_assembly_id:
+            messagebox.showerror("Error", "Seleccione una asamblea primero.")
+            return
+
+        unidad_selection = self.poder_unidad_combo.get()
+        if not unidad_selection:
+            messagebox.showerror("Error", "Seleccione la unidad que otorga el poder.")
+            return
+
         try:
-            id_unidad = int(unidad_selection.split(":")[0].strip())
+            id_unidad_da_poder = int(unidad_selection.split(":")[0].strip())
         except (ValueError, IndexError):
-            messagebox.showerror("Error", "Selección unidad inválida."); return
-        propietario_unidad = self.execute_query("SELECT cedula_propietario FROM unidades WHERE id_unidad = ?",
-                                                (id_unidad,), fetchone=True)
-        if propietario_unidad and propietario_unidad[0] == cedula_apoderado: messagebox.showerror("Error",
-                                                                                                  "Propietario no puede ser apoderado de su unidad."); return
+            messagebox.showerror("Error", "Selección de unidad que otorga el poder inválida.")
+            return
+
+        # Obtener la cédula del propietario de la unidad que da el poder
+        propietario_da_poder_info = self.execute_query(
+            "SELECT cedula_propietario FROM unidades WHERE id_unidad = ?",
+            (id_unidad_da_poder,), fetchone=True
+        )
+        if not propietario_da_poder_info or not propietario_da_poder_info[0]:
+            messagebox.showerror("Error",
+                                 f"La unidad {unidad_selection.split(':')[1].strip()} no tiene un propietario asignado.")
+            return
+        cedula_propietario_da_poder = propietario_da_poder_info[0]
+
+        cedula_apoderado = ""
+        nombre_apoderado = ""
+        tipo_seleccionado = self.tipo_apoderado_var.get()
+
+        if tipo_seleccionado == "tercero":
+            cedula_apoderado = self.poder_cedula_apod_entry.get().strip()
+            nombre_apoderado = self.poder_nombre_apod_entry.get().strip()
+            if not cedula_apoderado or not nombre_apoderado:
+                messagebox.showerror("Error", "Para apoderado tercero, ingrese Cédula y Nombre.")
+                return
+        elif tipo_seleccionado == "propietario":
+            apoderado_propietario_selection = self.poder_propietario_apoderado_combo.get()
+            if not apoderado_propietario_selection:
+                messagebox.showerror("Error", "Seleccione un propietario como apoderado.")
+                return
+            try:
+                cedula_apoderado = apoderado_propietario_selection.split(":")[0].strip()
+                nombre_apoderado_info = self.execute_query("SELECT nombre FROM propietarios WHERE cedula = ?",
+                                                           (cedula_apoderado,), fetchone=True)
+                if nombre_apoderado_info:
+                    nombre_apoderado = nombre_apoderado_info[0]
+                else:
+                    messagebox.showerror("Error", "No se encontró el nombre del propietario apoderado seleccionado.")
+                    return
+            except (ValueError, IndexError):
+                messagebox.showerror("Error", "Selección de propietario apoderado inválida.")
+                return
+        else:
+            messagebox.showerror("Error", "Tipo de apoderado no reconocido.")
+            return
+
+        if cedula_apoderado == cedula_propietario_da_poder:
+            messagebox.showerror("Error de Lógica",
+                                 "Un propietario no puede ser apoderado de su propia unidad para efectos de representación por poder.")
+            return
+
         try:
             self.execute_query(
                 "INSERT INTO poderes (asamblea_id, id_unidad_da_poder, cedula_apoderado, nombre_apoderado) VALUES (?, ?, ?, ?)",
-                (self.current_assembly_id, id_unidad, cedula_apoderado, nombre_apoderado), commit=True)
-            messagebox.showinfo("Éxito", "Poder asignado.");
-            self.load_proxies_for_assembly();
-            self.poder_cedula_apod_entry.delete(0, tk.END);
-            self.poder_nombre_apod_entry.delete(0, tk.END);
+                (self.current_assembly_id, id_unidad_da_poder, cedula_apoderado, nombre_apoderado), commit=True
+            )
+            messagebox.showinfo("Éxito", "Poder asignado correctamente.")
+            self.load_proxies_for_assembly()
+            self.poder_cedula_apod_entry.delete(0, tk.END)
+            self.poder_nombre_apod_entry.delete(0, tk.END)
+            if hasattr(self, 'poder_propietario_apoderado_combo'): self.poder_propietario_apoderado_combo.set('')
             self.poder_unidad_combo.set('')
-        except sqlite3.IntegrityError:
-            messagebox.showerror("Error", "Ya existe poder para esta unidad en esta asamblea.");
+        except sqlite3.IntegrityError as e:
+            if "UNIQUE constraint failed: poderes.asamblea_id, poderes.id_unidad_da_poder" in str(e) or \
+                    "UNIQUE constraint failed: poderes.asamblea_id, poderes.id_unidad_da_poder" in str(e).upper():
+                messagebox.showerror("Error de Duplicidad", "Esta unidad ya ha otorgado un poder para esta asamblea.")
+            else:
+                messagebox.showerror("Error de Base de Datos", f"No se pudo asignar el poder: {e}")
         except Exception as e:
-            messagebox.showerror("Error", f"No se pudo asignar: {e}")
+            messagebox.showerror("Error Inesperado", f"Ocurrió un error al asignar el poder: {e}")
 
     def load_proxies_for_assembly(self):
-        for i in self.powers_tree.get_children(): self.powers_tree.delete(i)
+        if hasattr(self, 'powers_tree'):  # Verificar si el treeview existe
+            for i in self.powers_tree.get_children(): self.powers_tree.delete(i)
+        else:  # Si no existe, no hacer nada más
+            return
+
         if not self.current_assembly_id: return
-        query = """SELECT p.id, u.nombre_unidad, pr.nombre, p.cedula_apoderado, p.nombre_apoderado FROM poderes p JOIN unidades u ON p.id_unidad_da_poder = u.id_unidad JOIN propietarios pr ON u.cedula_propietario = pr.cedula WHERE p.asamblea_id = ? ORDER BY u.nombre_unidad"""
+
+        query = """
+            SELECT p.id, u.nombre_unidad, prop_da.nombre, p.cedula_apoderado, p.nombre_apoderado 
+            FROM poderes p 
+            JOIN unidades u ON p.id_unidad_da_poder = u.id_unidad
+            LEFT JOIN propietarios prop_da ON u.cedula_propietario = prop_da.cedula 
+            WHERE p.asamblea_id = ? 
+            ORDER BY u.nombre_unidad
+        """
         proxies = self.execute_query(query, (self.current_assembly_id,), fetchall=True)
         if proxies:
-            for id_p, nom_u, nom_prop, ced_apod, nom_apod in proxies: self.powers_tree.insert("", "end", values=(
-            id_p, nom_u, nom_prop, ced_apod, nom_apod))
+            for id_p, nom_u, nom_prop_da_poder, ced_apod, nom_apod in proxies:
+                self.powers_tree.insert("", "end", values=(
+                    id_p, nom_u, nom_prop_da_poder if nom_prop_da_poder else "N/A", ced_apod, nom_apod
+                ))
 
     def delete_proxy(self):
         selected = self.powers_tree.focus();
@@ -1050,70 +1315,92 @@ class App:
                 ttk.Label(self.options_radio_frame, text="Opciones se mostrarán al activar.").pack(anchor=tk.W)
 
     def activate_question_for_voting(self):
-        """Activa pregunta, insertando 'No Votó' para elegibles presentes."""
-        selection = self.voting_question_combobox.get();
-        if not selection: messagebox.showerror("Error", "Seleccione pregunta."); return
-        if not self.current_assembly_id: messagebox.showerror("Error", "Seleccione asamblea."); return
+        selection = self.voting_question_combobox.get()
+        if not selection: messagebox.showerror("Error", "Seleccione una pregunta para activar."); return
+        if not self.current_assembly_id: messagebox.showerror("Error", "Seleccione una asamblea primero."); return
+
         try:
             new_active_question_id = int(selection.split(":")[0])
         except ValueError:
-            messagebox.showerror("Error", "Selección inválida."); return
+            messagebox.showerror("Error", "Selección de pregunta inválida.");
+            return
 
         q_info = self.execute_query("SELECT estado FROM preguntas WHERE id = ?", (new_active_question_id,),
                                     fetchone=True)
         if not q_info: messagebox.showerror("Error", "Pregunta no encontrada."); return
         if q_info[0] == ESTADO_PREGUNTA_CERRADA: messagebox.showwarning("Advertencia",
-                                                                        "Pregunta ya está cerrada."); return
-        if q_info[0] == ESTADO_PREGUNTA_ACTIVA: messagebox.showinfo("Info", "Pregunta ya está activa."); return
+                                                                        "Esta pregunta ya está cerrada y no puede reactivarse así."); return
+        if q_info[0] == ESTADO_PREGUNTA_ACTIVA and self.current_question_id == new_active_question_id:
+            messagebox.showinfo("Info", "Esta pregunta ya está activa.");
+            return
 
-        eligible_info = self._get_eligible_voters_info()
-        if not eligible_info:
-            messagebox.showwarning("Sin Votantes", "No hay votantes elegibles presentes para esta asamblea.")
+        self.load_eligible_voters_for_voting()
+        if not self._processed_eligible_voters_info:
+            messagebox.showwarning("Sin Votantes",
+                                   "No hay votantes elegibles (presentes y configurados) para esta asamblea. No se puede activar la pregunta.")
+            return
 
         initial_votes_to_insert = []
-        for voter_unit in eligible_info:
-            initial_votes_to_insert.append((
-                new_active_question_id,
-                voter_unit['id_unidad']
-            ))
+        for voter_entity in self._processed_eligible_voters_info:
+            cedula_votante = voter_entity['cedula_votante']
+            for unidad_representada in voter_entity['unidades_representadas']:
+                initial_votes_to_insert.append((
+                    new_active_question_id,
+                    unidad_representada['id_unidad'],
+                    cedula_votante
+                ))
 
-        conn = sqlite3.connect(DB_NAME);
-        conn.execute("PRAGMA foreign_keys = ON");
-        cursor = conn.cursor()
-        inserted_count = 0
+        # Utilizar una única conexión para todas las operaciones de esta función
+        conn = None
         try:
-            cursor.executemany(
-                f"INSERT OR IGNORE INTO votos (pregunta_id, id_unidad_representada, cedula_ejecuta_voto, opcion_elegida) VALUES (?, ?, NULL, '{OPCION_NO_VOTO}')",
-                initial_votes_to_insert)
-            inserted_count = cursor.rowcount
-            conn.commit()
+            conn = sqlite3.connect(DB_NAME, timeout=10)  # Añadir un timeout
+            conn.execute("PRAGMA foreign_keys = ON")
+            cursor = conn.cursor()
+
+            # Si hay una pregunta activa diferente, cerrarla primero
+            if self.current_question_id is not None and self.current_question_id != new_active_question_id:
+                cursor.execute("UPDATE preguntas SET estado = ? WHERE id = ? AND asamblea_id = ?",
+                               (ESTADO_PREGUNTA_CERRADA, self.current_question_id, self.current_assembly_id))
+
+            inserted_count = 0
+            if initial_votes_to_insert:
+                cursor.executemany(
+                    f"INSERT OR IGNORE INTO votos (pregunta_id, id_unidad_representada, cedula_ejecuta_voto, opcion_elegida) VALUES (?, ?, ?, '{OPCION_NO_VOTO}')",
+                    initial_votes_to_insert
+                )
+                inserted_count = cursor.rowcount
+
+            cursor.execute("UPDATE preguntas SET estado = ? WHERE id = ? AND asamblea_id = ?",
+                           (ESTADO_PREGUNTA_ACTIVA, new_active_question_id, self.current_assembly_id))
+            conn.commit()  # Confirmar todas las operaciones juntas
             print(
                 f"INFO: Insertados/Ignorados {inserted_count} votos iniciales como '{OPCION_NO_VOTO}' para pregunta {new_active_question_id}.")
+
         except sqlite3.Error as e:
-            conn.rollback()
-            messagebox.showerror("Error DB", f"No se pudo inicializar 'No Votó': {e}")
+            if conn: conn.rollback()
+            messagebox.showerror("Error DB", f"No se pudo inicializar la pregunta para votación: {e}")
             return
         finally:
-            conn.close()
+            if conn: conn.close()
 
-        if self.current_question_id is not None and self.current_question_id != new_active_question_id:
-            self.execute_query("UPDATE preguntas SET estado = ? WHERE id = ? AND asamblea_id = ?",
-                               (ESTADO_PREGUNTA_CERRADA, self.current_question_id, self.current_assembly_id),
-                               commit=True)
-        self.execute_query("UPDATE preguntas SET estado = ? WHERE id = ? AND asamblea_id = ?",
-                           (ESTADO_PREGUNTA_ACTIVA, new_active_question_id, self.current_assembly_id), commit=True)
+        self.current_question_id = new_active_question_id
+        question_text_selected = ""
+        for val in self.voting_question_combobox['values']:
+            if val.startswith(str(new_active_question_id) + ":"):
+                question_text_selected = val.split(":", 1)[1].strip();
+                break
 
-        self.current_question_id = new_active_question_id;
-        question_text = selection.split(":", 1)[1].strip()
-        self.active_question_label.config(text=f"Pregunta Activa (ID: {self.current_question_id}): {question_text}")
+        if hasattr(self, 'active_question_label'):
+            self.active_question_label.config(
+                text=f"Pregunta Activa (ID: {self.current_question_id}): {question_text_selected}")
 
-        self.update_vote_options_ui(self.current_question_id, for_display_only=False);
-        self.load_eligible_voters_for_voting();
-        self.display_vote_results_for_question(self.current_question_id);
+        self.update_vote_options_ui(self.current_question_id, for_display_only=False)
+        self.display_vote_results_for_question(self.current_question_id)
         self.load_questions_for_assembly()
         self.load_questions_for_lista_vt()
         messagebox.showinfo("Votación Activada",
-                            f"Pregunta '{question_text}' activa. Estado inicial: '{OPCION_NO_VOTO}'.")
+                            f"Pregunta '{question_text_selected}' activada. Estado inicial para elegibles: '{OPCION_NO_VOTO}'.")
+
 
     def close_current_question_voting(self):
         """Cierra la votación. Los que no votaron quedan como 'No Votó'."""
@@ -1141,189 +1428,384 @@ class App:
             for widget in self.options_radio_frame.winfo_children(): widget.destroy()
 
     def _get_eligible_voters_info(self):
-        if not self.current_assembly_id: return []
-        asistencia = self.execute_query(
-            "SELECT cedula_asistente, tipo_asistente FROM asistencia WHERE asamblea_id = ? AND presente = 1",
-            (self.current_assembly_id,), fetchall=True)
-        if not asistencia: return []
-        presentes_map = {row[0]: row[1] for row in asistencia}
+        """
+        Determina los votantes elegibles y las unidades/coeficientes que representan.
+        Un votante (propietario o apoderado) aparece una sola vez, incluso si representa múltiples unidades.
+        Retorna una lista de diccionarios, cada uno representando un 'ente votante'.
+        """
+        if not self.current_assembly_id:
+            return []
+
+        asistencia_presente = self.execute_query(
+            "SELECT cedula_asistente, nombre_asistente, tipo_asistente FROM asistencia WHERE asamblea_id = ? AND presente = 1",
+            (self.current_assembly_id,), fetchall=True
+        )
+        if not asistencia_presente:
+            return []
+
+        presentes_map = {row[0]: {'nombre': row[1], 'tipo_asistencia': row[2]} for row in asistencia_presente}
+
+        unidades_info = self.execute_query(
+            """SELECT u.id_unidad, u.nombre_unidad, u.coeficiente, u.cedula_propietario, p.nombre 
+               FROM unidades u 
+               LEFT JOIN propietarios p ON u.cedula_propietario = p.cedula 
+               WHERE p.activo = 1 OR u.cedula_propietario IS NULL""",
+            fetchall=True
+        )
+        if not unidades_info:
+            return []
+
         poderes_dados = self.execute_query(
-            "SELECT id_unidad_da_poder, cedula_apoderado FROM poderes WHERE asamblea_id = ?",
-            (self.current_assembly_id,), fetchall=True)
-        unidades_con_poder = {row[0]: row[1] for row in poderes_dados} if poderes_dados else {}
-        apoderados_con_poder = {row[1] for row in poderes_dados} if poderes_dados else set()
-        unidades = self.execute_query("SELECT id_unidad, nombre_unidad, coeficiente, cedula_propietario FROM unidades",
-                                      fetchall=True)
-        if not unidades: return []
-        eligible_voters = []
-        for id_u, nom_u, coef, ced_prop in unidades:
-            if not ced_prop: continue
-            if ced_prop in presentes_map and presentes_map[
-                ced_prop] == TIPO_ASISTENTE_PROPIETARIO and id_u not in unidades_con_poder:
-                prop_info = self.execute_query("SELECT nombre FROM propietarios WHERE cedula = ?", (ced_prop,),
-                                               fetchone=True)
-                eligible_voters.append(
-                    {'cedula_ejecuta': ced_prop, 'nombre_ejecuta': prop_info[0] if prop_info else '??',
-                     'id_unidad': id_u, 'nombre_unidad': nom_u, 'coeficiente': coef})
-            elif id_u in unidades_con_poder:
-                ced_apod = unidades_con_poder[id_u]
-                if ced_apod in presentes_map:
-                    apod_info = self.execute_query(
-                        "SELECT nombre_asistente FROM asistencia WHERE asamblea_id = ? AND cedula_asistente = ?",
-                        (self.current_assembly_id, ced_apod), fetchone=True)
-                    if not apod_info: apod_info = self.execute_query(
-                        "SELECT nombre_apoderado FROM poderes WHERE asamblea_id = ? AND cedula_apoderado = ? LIMIT 1",
-                        (self.current_assembly_id, ced_apod), fetchone=True)
-                    eligible_voters.append(
-                        {'cedula_ejecuta': ced_apod, 'nombre_ejecuta': apod_info[0] if apod_info else '??',
-                         'id_unidad': id_u, 'nombre_unidad': nom_u, 'coeficiente': coef})
-        return eligible_voters
+            """SELECT p.id_unidad_da_poder, u.nombre_unidad AS nombre_unidad_da_poder, 
+                      u.coeficiente AS coef_unidad_da_poder, 
+                      u.cedula_propietario AS ced_prop_da_poder, prop_da.nombre AS nom_prop_da_poder,
+                      p.cedula_apoderado, p.nombre_apoderado 
+               FROM poderes p
+               JOIN unidades u ON p.id_unidad_da_poder = u.id_unidad
+               LEFT JOIN propietarios prop_da ON u.cedula_propietario = prop_da.cedula
+               WHERE p.asamblea_id = ?""",
+            (self.current_assembly_id,), fetchall=True
+        )
+
+        map_unidad_a_poder = {
+            poder[0]: {
+                'nombre_unidad_da_poder': poder[1],
+                'coef_unidad_da_poder': poder[2],
+                'ced_prop_da_poder': poder[3],
+                'nom_prop_da_poder': poder[4],
+                'cedula_apoderado': poder[5],
+                'nombre_apoderado_registrado_poder': poder[6]
+            } for poder in poderes_dados
+        } if poderes_dados else {}
+
+        apoderados_representan = defaultdict(list)
+        for id_unidad, poder_info in map_unidad_a_poder.items():
+            ced_apoderado = poder_info['cedula_apoderado']
+            if ced_apoderado in presentes_map:
+                apoderados_representan[ced_apoderado].append({
+                    'id_unidad': id_unidad,
+                    'nombre_unidad': poder_info['nombre_unidad_da_poder'],
+                    'coeficiente': poder_info['coef_unidad_da_poder'],
+                    'propietario_original_cedula': poder_info['ced_prop_da_poder'],
+                    'propietario_original_nombre': poder_info['nom_prop_da_poder']
+                })
+
+        votantes_finales = {}
+
+        for id_unidad, nombre_u, coef_u, ced_prop_u, nom_prop_u in unidades_info:
+            if not ced_prop_u: continue
+
+            if id_unidad not in map_unidad_a_poder:
+                if ced_prop_u in presentes_map:
+                    if ced_prop_u not in votantes_finales:
+                        votantes_finales[ced_prop_u] = {
+                            'cedula_votante': ced_prop_u,
+                            'nombre_votante': presentes_map[ced_prop_u]['nombre'],
+                            'unidades_representadas': [],
+                            'coef_total': 0.0,
+                            'tipo_votante': 'Propietario Directo'
+                        }
+                    votantes_finales[ced_prop_u]['unidades_representadas'].append({
+                        'id_unidad': id_unidad,
+                        'nombre_unidad': nombre_u,
+                        'coeficiente': coef_u,
+                        'propietario_original_cedula': ced_prop_u,
+                        'propietario_original_nombre': nom_prop_u
+                    })
+                    votantes_finales[ced_prop_u]['coef_total'] += coef_u
+
+        for ced_apoderado, unidades_que_representa_lista in apoderados_representan.items():
+            if not unidades_que_representa_lista: continue
+
+            nombre_del_apoderado_para_votar = presentes_map[ced_apoderado]['nombre']
+
+            if ced_apoderado not in votantes_finales:
+                votantes_finales[ced_apoderado] = {
+                    'cedula_votante': ced_apoderado,
+                    'nombre_votante': nombre_del_apoderado_para_votar,
+                    'unidades_representadas': [],
+                    'coef_total': 0.0,
+                    'tipo_votante': 'Apoderado'
+                }
+            else:
+                votantes_finales[ced_apoderado]['tipo_votante'] = 'Propietario y Apoderado'
+
+            for unidad_rep_info in unidades_que_representa_lista:
+                votantes_finales[ced_apoderado]['unidades_representadas'].append(unidad_rep_info)
+                votantes_finales[ced_apoderado]['coef_total'] += unidad_rep_info['coeficiente']
+
+        processed_list = []
+        for _, votante_data in votantes_finales.items():
+            if votante_data['unidades_representadas']:
+                nombres_unidades = ", ".join(u['nombre_unidad'] for u in votante_data['unidades_representadas'])
+                votante_data['display_text'] = (
+                    f"{votante_data['cedula_votante']}: {votante_data['nombre_votante']} "
+                    f"(Coef: {votante_data['coef_total']:.4f} / Unidades: {nombres_unidades})"
+                )
+                processed_list.append(votante_data)
+
+        return sorted(processed_list, key=lambda x: x['nombre_votante'])
 
     def load_eligible_voters_for_voting(self):
-        self.voting_resident_combobox['values'] = [];
-        self.voting_resident_combobox.set('')
-        if not self.current_assembly_id: return
-        eligible_info = self._get_eligible_voters_info()
-        if not eligible_info: return
-        combo_list = [
-            f"{v['cedula_ejecuta']}: {v['nombre_ejecuta']} (Por: {v['nombre_unidad']} / Coef: {v['coeficiente']})" for v
-            in eligible_info]
-        self.voting_resident_combobox['values'] = sorted(combo_list)
-        if combo_list:
-            self.voting_resident_combobox.current(0)
-        else:
+        # Limpiar combobox y lista interna
+        if hasattr(self, 'voting_resident_combobox'):
+            self.voting_resident_combobox['values'] = []
             self.voting_resident_combobox.set('')
+        self._processed_eligible_voters_info = []
+
+        if not self.current_assembly_id:
+            return
+
+        self._processed_eligible_voters_info = self._get_eligible_voters_info()
+
+        if not self._processed_eligible_voters_info:
+            # Opcional: messagebox.showinfo("Información", "No hay votantes elegibles presentes y configurados para esta asamblea.")
+            return
+
+        combo_list = [voter['display_text'] for voter in self._processed_eligible_voters_info]
+
+        if hasattr(self, 'voting_resident_combobox'):
+            self.voting_resident_combobox['values'] = combo_list
+            if combo_list:
+                self.voting_resident_combobox.current(0)
+            else:
+                self.voting_resident_combobox.set('')
 
     def register_vote(self):
-        if not self.current_question_id: messagebox.showerror("Error", "Ninguna pregunta activa."); return
-        voter_selection_text = self.voting_resident_combobox.get();
-        opcion_elegida_str = self.vote_option_var_string.get()
-        if not voter_selection_text: messagebox.showerror("Error", "Seleccione votante."); return
-        if not opcion_elegida_str: messagebox.showerror("Error", "Seleccione opción."); return
-        try:
-            cedula_ejecuta = voter_selection_text.split(":")[0].strip()
-            unidad_info_str = voter_selection_text.split('(Por: ')[1].split(' / Coef:')[0]
-            unidad_data = self.execute_query("SELECT id_unidad FROM unidades WHERE nombre_unidad = ?",
-                                             (unidad_info_str,), fetchone=True)
-            if not unidad_data: raise ValueError(f"No se encontró ID unidad '{unidad_info_str}'")
-            id_unidad_representada = unidad_data[0]
-        except (IndexError, ValueError) as e:
-            messagebox.showerror("Error", f"Error procesando votante: {e}\nTexto: {voter_selection_text}"); return
-        try:
-            self.execute_query(
-                "INSERT OR REPLACE INTO votos (pregunta_id, id_unidad_representada, cedula_ejecuta_voto, opcion_elegida) VALUES (?, ?, ?, ?)",
-                (self.current_question_id, id_unidad_representada, cedula_ejecuta, opcion_elegida_str), commit=True)
-            messagebox.showinfo("Éxito", "Voto registrado/actualizado.")
-            self.display_vote_results_for_question(self.current_question_id);
-            self.vote_option_var_string.set("")
-        except Exception as e:
-            messagebox.showerror("Error", f"No se pudo registrar: {e}")
+        if not self.current_question_id:
+            messagebox.showerror("Error", "Ninguna pregunta está activa para votación.")
+            return
 
-    def get_voting_weights(self):
-        unidades = self.execute_query("SELECT id_unidad, coeficiente FROM unidades", fetchall=True)
-        return {u[0]: u[1] for u in unidades} if unidades else {}
+        voter_selection_text = self.voting_resident_combobox.get()
+        opcion_elegida_str = self.vote_option_var_string.get()
+
+        if not voter_selection_text:
+            messagebox.showerror("Error", "Seleccione un votante de la lista.")
+            return
+        if not opcion_elegida_str:
+            messagebox.showerror("Error", "Seleccione una opción de voto.")
+            return
+
+        selected_voter_info = None
+        for voter_info in self._processed_eligible_voters_info:
+            if voter_info['display_text'] == voter_selection_text:
+                selected_voter_info = voter_info
+                break
+
+        if not selected_voter_info:
+            messagebox.showerror("Error",
+                                 "No se pudo encontrar la información del votante seleccionado. Recargue los votantes.")
+            return
+
+        cedula_que_ejecuta_el_voto = selected_voter_info['cedula_votante']
+        unidades_a_votar = selected_voter_info['unidades_representadas']
+
+        if not unidades_a_votar:
+            messagebox.showerror("Error", "El votante seleccionado no representa ninguna unidad.")
+            return
+
+        conn = sqlite3.connect(DB_NAME)
+        conn.execute("PRAGMA foreign_keys = ON")
+        cursor = conn.cursor()
+        votos_registrados_count = 0
+        try:
+            for unidad_info in unidades_a_votar:
+                id_unidad_representada = unidad_info['id_unidad']
+                cursor.execute(
+                    "INSERT OR REPLACE INTO votos (pregunta_id, id_unidad_representada, cedula_ejecuta_voto, opcion_elegida) VALUES (?, ?, ?, ?)",
+                    (self.current_question_id, id_unidad_representada, cedula_que_ejecuta_el_voto, opcion_elegida_str)
+                )
+                if cursor.rowcount > 0:
+                    votos_registrados_count += 1
+            conn.commit()
+
+            if votos_registrados_count > 0:
+                messagebox.showinfo("Éxito",
+                                    f"Voto(s) para {len(unidades_a_votar)} unidad(es) por '{selected_voter_info['nombre_votante']}' registrado(s)/actualizado(s) como '{opcion_elegida_str}'.")
+            else:  # Esto puede pasar si el voto ya existía y era el mismo
+                messagebox.showinfo("Información",
+                                    f"El voto para '{selected_voter_info['nombre_votante']}' como '{opcion_elegida_str}' ya estaba registrado o no hubo cambios.")
+
+            self.display_vote_results_for_question(self.current_question_id)
+            self.vote_option_var_string.set("")
+
+            # Opcional: Avanzar al siguiente votante o limpiar selección
+            current_idx = self.voting_resident_combobox.current()
+            if self.voting_resident_combobox['values'] and current_idx < len(
+                    self.voting_resident_combobox['values']) - 1:
+                self.voting_resident_combobox.current(current_idx + 1)
+            # else: # Si es el último, podría limpiarse o quedarse ahí
+            #    self.voting_resident_combobox.set('')
+
+        except sqlite3.Error as e:
+            conn.rollback()
+            messagebox.showerror("Error de Base de Datos", f"No se pudo registrar el voto: {e}")
+        except Exception as e:
+            conn.rollback()  # Asegurar rollback en cualquier excepción
+            messagebox.showerror("Error Inesperado", f"Ocurrió un error al registrar el voto: {e}")
+        finally:
+            if conn:
+                conn.close()
+
+        if hasattr(self, 'load_lista_votacion_data'):
+            self.load_lista_votacion_data()
 
     def display_vote_results_for_question(self, question_id_for_results, final=False):
-        if not self.current_assembly_id: messagebox.showwarning("Advertencia",
-                                                                "No hay asamblea."); self.clear_voting_area(); return
-        if not question_id_for_results: self.clear_voting_area(); return
-        if hasattr(self,
-                   'results_canvas_widget') and self.results_canvas_widget: self.results_canvas_widget.destroy(); self.results_canvas_widget = None
+        if not self.current_assembly_id:
+            self.clear_voting_area();
+            return
+        if not question_id_for_results:
+            self.clear_voting_area();
+            return
+
+        if hasattr(self, 'results_canvas_widget') and self.results_canvas_widget:
+            self.results_canvas_widget.destroy();
+            self.results_canvas_widget = None
         if hasattr(self, 'results_display_frame') and self.results_display_frame.winfo_exists():
             for widget in self.results_display_frame.winfo_children(): widget.destroy()
+
         q_info = self.execute_query("SELECT texto_pregunta, estado, opciones_configuradas FROM preguntas WHERE id = ?",
                                     (question_id_for_results,), fetchone=True)
         if not q_info:
-            if hasattr(self.results_display_frame,
-                       'winfo_exists') and self.results_display_frame.winfo_exists(): ttk.Label(
-                self.results_display_frame, text=f"Pregunta ID {question_id_for_results} no encontrada.").pack(pady=20)
+            if hasattr(self.results_display_frame, 'winfo_exists') and self.results_display_frame.winfo_exists():
+                ttk.Label(self.results_display_frame,
+                          text=f"Pregunta ID {question_id_for_results} no encontrada.").pack(pady=20)
             return
+
         q_text, q_estado, q_options_str = q_info;
         q_options_list = [opt.strip() for opt in q_options_str.split(',')] if q_options_str else ["Acepta", "No Acepta",
                                                                                                   "En Blanco"]
+
+        # Asegurar que OPCION_NO_VOTO está en la lista de opciones para el reporteo
+        if OPCION_NO_VOTO not in q_options_list:
+            q_options_list.append(OPCION_NO_VOTO)
+
         votes_data = self.execute_query(
             "SELECT id_unidad_representada, opcion_elegida FROM votos WHERE pregunta_id = ?",
-            (question_id_for_results,), fetchall=True)
-        votes_by_unit = {v[0]: v[1] for v in votes_data} if votes_data else {}
-        all_unit_weights = self.get_voting_weights();
+            (question_id_for_results,), fetchall=True
+        )
+        votes_by_unit_id = {v[0]: v[1] for v in votes_data} if votes_data else {}
+
+        # Usar get_voting_weights que definiste para obtener todos los coeficientes de las unidades
+        all_units_with_coef = self.execute_query("SELECT id_unidad, coeficiente FROM unidades", fetchall=True)
+        all_unit_weights = {u[0]: u[1] for u in all_units_with_coef} if all_units_with_coef else {}
+
         total_coeficiente_condominio = sum(all_unit_weights.values())
-        weighted_results = Counter();
-        voted_units_count = Counter();
-        total_coef_voted = 0
+
+        weighted_results = Counter()
+        voted_units_count = Counter()
+        total_coef_participante_efectivo = 0.0
+
         for id_unidad, coef in all_unit_weights.items():
-            if id_unidad in votes_by_unit and votes_by_unit[id_unidad] != OPCION_NO_VOTO:
-                opcion = votes_by_unit[id_unidad];
-                weighted_results[opcion] += coef;
-                voted_units_count[opcion] += 1;
-                total_coef_voted += coef
-        coef_no_voto = total_coeficiente_condominio - total_coef_voted
-        if abs(coef_no_voto) < 0.0001: coef_no_voto = 0
-        no_voto_label = OPCION_NO_VOTO
-        if no_voto_label not in q_options_list: q_options_list.append(no_voto_label)
-        weighted_results[no_voto_label] = coef_no_voto
-        voted_units_count[no_voto_label] = len(all_unit_weights) - sum(
-            v for k, v in voted_units_count.items() if k != no_voto_label)
-        chart_labels = [];
-        chart_sizes = [];
-        options_for_chart = q_options_list
-        for option_text_label in options_for_chart:
-            coef_for_option = weighted_results[option_text_label]
-            percentage = (
-                                     coef_for_option / total_coeficiente_condominio) * 100 if total_coeficiente_condominio > 0 else 0
-            if coef_for_option > 0.0001: chart_labels.append(
-                f"{option_text_label}\n({coef_for_option:.4f} coef, {percentage:.1f}%)"); chart_sizes.append(
-                coef_for_option)
+            opcion_votada_para_unidad = votes_by_unit_id.get(id_unidad, OPCION_NO_VOTO)
+
+            weighted_results[opcion_votada_para_unidad] += coef
+            voted_units_count[opcion_votada_para_unidad] += 1
+
+            if opcion_votada_para_unidad != OPCION_NO_VOTO:
+                total_coef_participante_efectivo += coef
+
+        # Asegurar que todas las opciones configuradas (y "No Votó") tengan una entrada en los contadores
+        for option_text_label in q_options_list:
+            if option_text_label not in weighted_results: weighted_results[option_text_label] = 0.0
             if option_text_label not in voted_units_count: voted_units_count[option_text_label] = 0
-        if not chart_sizes:
-            if hasattr(self.results_display_frame,
-                       'winfo_exists') and self.results_display_frame.winfo_exists(): ttk.Label(
-                self.results_display_frame, text=f"Sin votos válidos para graficar:\n'{q_text}'").pack(pady=20)
-            return
+
+        chart_labels = []
+        chart_sizes = []
+        for opt_text in q_options_list:  # Iterar en el orden de q_options_list para consistencia
+            coef_for_option = weighted_results[opt_text]
+            if coef_for_option > 0.00001:  # Umbral para graficar
+                percentage_total = (
+                                               coef_for_option / total_coeficiente_condominio) * 100 if total_coeficiente_condominio > 0 else 0
+                chart_labels.append(f"{opt_text}\n({coef_for_option:.4f} coef, {percentage_total:.1f}%)")
+                chart_sizes.append(coef_for_option)
+
         fig, ax = plt.subplots(figsize=(6, 4.5));
-        wedges, _, autotexts = ax.pie(chart_sizes, labels=None,
-                                      autopct=lambda p: '{:.1f}%'.format(p) if p > 0.1 else '', startangle=90,
-                                      pctdistance=0.85, wedgeprops=dict(width=0.4));
-        ax.axis('equal');
-        ax.legend(wedges, chart_labels, title="Opciones", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1),
-                  fontsize='small');
-        plt.subplots_adjust(left=0.05, right=0.65, top=0.9, bottom=0.05)
+        if chart_sizes:
+            wedges, texts, autotexts = ax.pie(chart_sizes, labels=None,
+                                              autopct=lambda p: '{:.1f}%'.format(p) if p > 0.1 else '',
+                                              startangle=90, pctdistance=0.85, wedgeprops=dict(width=0.4));
+            ax.axis('equal');
+            ax.legend(wedges, chart_labels, title="Opciones y Coeficientes", loc="center left",
+                      bbox_to_anchor=(1, 0, 0.5, 1), fontsize='small');
+            plt.subplots_adjust(left=0.05, right=0.60, top=0.9, bottom=0.05)
+        else:
+            ax.text(0.5, 0.5, "Sin datos para graficar", horizontalalignment='center', verticalalignment='center',
+                    transform=ax.transAxes)
+
         title_text = f"Resultados: {q_text}"
-        if final:
+        if final or q_estado == ESTADO_PREGUNTA_CERRADA:
             title_text = f"Resultados Finales: {q_text}"
         elif q_estado == ESTADO_PREGUNTA_ACTIVA:
             title_text = f"Resultados Parciales: {q_text} (Votación Abierta)"
-        elif q_estado == ESTADO_PREGUNTA_CERRADA:
-            title_text = f"Resultados (Votación Cerrada): {q_text}"
         plt.title(title_text, pad=20, loc='center', fontsize=10)
-        info_text_lines = [f"Pregunta ID: {question_id_for_results}"];
-        info_text_lines.append("\nConteo (unidades):");
-        for opt_text in q_options_list: info_text_lines.append(f"- {opt_text}: {voted_units_count[opt_text]}")
-        info_text_lines.append(f"\nTotal Coeficiente Condominio: {total_coeficiente_condominio:.4f}");
-        info_text_lines.append(f"Coeficiente Votado (excl. No Votó): {total_coef_voted:.4f}")
-        if total_coeficiente_condominio > 0: participation = (
-                                                                         total_coef_voted / total_coeficiente_condominio) * 100; info_text_lines.append(
-            f"Participación (coeficiente): {participation:.1f}%")
+
+        info_text_lines = [f"Pregunta ID: {question_id_for_results} (Estado: {q_estado.capitalize()})"]
+        info_text_lines.append("\nResultados por Coeficiente:")
+        for opt_text in q_options_list:
+            coef_val = weighted_results[opt_text]
+            perc_total_condominio = (
+                                                coef_val / total_coeficiente_condominio) * 100 if total_coeficiente_condominio > 0 else 0
+            info_text_lines.append(
+                f"- {opt_text}: {coef_val:.4f} coef. ({perc_total_condominio:.1f}% del total condominio)")
+
+        info_text_lines.append("\nConteo por Unidades:")
+        for opt_text in q_options_list:
+            info_text_lines.append(f"- {opt_text}: {voted_units_count[opt_text]} unidad(es)")
+
+        info_text_lines.append(f"\nTotal Coeficiente Condominio: {total_coeficiente_condominio:.4f}")
+        info_text_lines.append(f"Coeficiente Participante (votos efectivos): {total_coef_participante_efectivo:.4f}")
+        if total_coeficiente_condominio > 0:
+            participation_percentage = (total_coef_participante_efectivo / total_coeficiente_condominio) * 100
+            info_text_lines.append(f"Participación (sobre coef. total): {participation_percentage:.1f}%")
+
+        # Sección de Decisión (Ejemplo)
+        opciones_afirmativas = ["acepta", "si", "aprueba", "de acuerdo"]  # Minúsculas para comparación insensible
+        coef_afirmativo_total = sum(
+            weighted_results[opt] for opt in weighted_results if opt.lower() in opciones_afirmativas)
+
+        if total_coef_participante_efectivo > 0.00001:  # Evitar división por cero
+            porcentaje_afirmativo_sobre_participantes = (coef_afirmativo_total / total_coef_participante_efectivo) * 100
+            info_text_lines.append(
+                f"\nCoeficiente Afirmativo (suma de {', '.join(opciones_afirmativas)}): {coef_afirmativo_total:.4f}")
+            info_text_lines.append(
+                f"  -> {porcentaje_afirmativo_sobre_participantes:.1f}% del coeficiente participante.")
+            if porcentaje_afirmativo_sobre_participantes > 50:
+                info_text_lines.append(f"DECISIÓN (Mayoría Simple Participantes): APROBADA")
+            else:
+                info_text_lines.append(f"DECISIÓN (Mayoría Simple Participantes): NO APROBADA")
+        else:
+            info_text_lines.append("\nNo hubo participación efectiva para determinar una decisión.")
+
         if hasattr(self.results_display_frame, 'winfo_exists') and self.results_display_frame.winfo_exists():
-            ttk.Label(self.results_display_frame, text="\n".join(info_text_lines), justify=tk.LEFT,
-                      wraplength=380).pack(pady=5, anchor='w', padx=5)
+            results_text_widget = tk.Text(self.results_display_frame, wrap="word", height=12,
+                                          font=("Arial", 9))  # Ajustar altura si es necesario
+            results_text_widget.pack(side=tk.LEFT, fill=tk.BOTH, padx=5, pady=5, expand=False)  # fill Y, expand False
+
+            scrollbar_results = ttk.Scrollbar(self.results_display_frame, orient="vertical",
+                                              command=results_text_widget.yview)
+            scrollbar_results.pack(side=tk.LEFT, fill="y")
+            results_text_widget.config(yscrollcommand=scrollbar_results.set)
+
+            for line in info_text_lines: results_text_widget.insert(tk.END, line + "\n")
+            results_text_widget.config(state="disabled")
+
             try:
                 if not os.path.exists(GRAFICOS_DIR): os.makedirs(GRAFICOS_DIR)
                 safe_q_text = "".join(c if c.isalnum() else "_" for c in q_text[:30]);
                 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S");
-                filename_suffix = "final" if final else "parcial"
-                if final:
-                    image_filename = f"asamblea_{self.current_assembly_id}_preg_{question_id_for_results}_{safe_q_text}_{filename_suffix}.png"
-                else:
-                    image_filename = f"asamblea_{self.current_assembly_id}_preg_{question_id_for_results}_{safe_q_text}_{filename_suffix}_{timestamp}.png"
+                filename_suffix = "final" if final or q_estado == ESTADO_PREGUNTA_CERRADA else "parcial"
+                image_filename = f"asamblea_{self.current_assembly_id}_preg_{question_id_for_results}_{safe_q_text}_{filename_suffix}_{timestamp}.png"
                 filepath = os.path.join(GRAFICOS_DIR, image_filename);
                 fig.savefig(filepath, bbox_inches='tight');
                 print(f"Gráfico guardado: {filepath}")
             except Exception as e:
-                print(f"Error guardando gráfico: {e}"); messagebox.showwarning("Error Guardar Gráfico",
-                                                                               f"No se pudo guardar:\n{e}")
-            figure_canvas = FigureCanvasTkAgg(fig, master=self.results_display_frame);
-            self.results_canvas_widget = figure_canvas.get_tk_widget();
-            self.results_canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True);
+                print(f"Error guardando gráfico: {e}");
+                messagebox.showwarning("Error Guardar Gráfico", f"No se pudo guardar:\n{e}")
+
+            figure_canvas = FigureCanvasTkAgg(fig, master=self.results_display_frame)
+            self.results_canvas_widget = figure_canvas.get_tk_widget()
+            self.results_canvas_widget.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
             figure_canvas.draw()
         plt.close(fig)
 
@@ -1387,28 +1869,66 @@ class App:
     def load_lista_votacion_data(self, event=None):
         if hasattr(self, 'lista_vt_tree'):
             for i in self.lista_vt_tree.get_children(): self.lista_vt_tree.delete(i)
-        asamblea_selection = self.lista_vt_asamblea_combo.get();
+
+        asamblea_selection = self.lista_vt_asamblea_combo.get()
         pregunta_selection = self.lista_vt_pregunta_combo.get()
+
         if not asamblea_selection or not pregunta_selection: return
         try:
-            asamblea_id = int(asamblea_selection.split(":")[0]); pregunta_id = int(pregunta_selection.split(":")[0])
+            asamblea_id = int(asamblea_selection.split(":")[0])
+            pregunta_id = int(pregunta_selection.split(":")[0])
         except (ValueError, IndexError):
+            messagebox.showerror("Error", "Selección de asamblea o pregunta inválida para la lista de votación.")
             return
-        unidades = self.execute_query(
-            """SELECT u.id_unidad, u.nombre_unidad, u.coeficiente, p.nombre FROM unidades u LEFT JOIN propietarios p ON u.cedula_propietario = p.cedula ORDER BY u.nombre_unidad""",
-            fetchall=True)
-        if not unidades: return
-        votos = self.execute_query(
-            """SELECT id_unidad_representada, cedula_ejecuta_voto, opcion_elegida FROM votos WHERE pregunta_id = ?""",
-            (pregunta_id,), fetchall=True)
-        votos_map = {v[0]: {'cedula': v[1], 'opcion': v[2]} for v in votos} if votos else {}
-        for id_u, nom_u, coef, nom_prop in unidades:
-            voto_info = votos_map.get(id_u)
-            cedula_voto = voto_info['cedula'] if voto_info and voto_info['opcion'] != OPCION_NO_VOTO else "---"
-            opcion_voto = voto_info['opcion'] if voto_info else OPCION_NO_VOTO
-            self.lista_vt_tree.insert("", "end",
-                                      values=(nom_u, f"{coef:.4f}", nom_prop or "N/A", cedula_voto, opcion_voto))
 
+        query = """
+            SELECT 
+                u.nombre_unidad, 
+                u.coeficiente,
+                prop_orig.cedula AS cedula_propietario_original,
+                prop_orig.nombre AS nombre_propietario_original,
+                v.cedula_ejecuta_voto,
+                -- Intenta obtener el nombre del ejecutor de varias fuentes:
+                -- 1. De la tabla propietarios (si el ejecutor es un propietario activo)
+                -- 2. De la tabla asistencia (si el ejecutor fue registrado en asistencia para esa asamblea)
+                -- 3. De la tabla poderes (nombre del apoderado como fue registrado en el poder)
+                -- 4. Si no, solo la cédula del ejecutor
+                COALESCE(
+                    (SELECT nombre FROM propietarios WHERE cedula = v.cedula_ejecuta_voto AND activo = 1),
+                    (SELECT nombre_asistente FROM asistencia WHERE cedula_asistente = v.cedula_ejecuta_voto AND asamblea_id = ?),
+                    (SELECT nombre_apoderado FROM poderes WHERE cedula_apoderado = v.cedula_ejecuta_voto AND asamblea_id = ? LIMIT 1),
+                    v.cedula_ejecuta_voto 
+                ) AS nombre_ejecuta_voto,
+                v.opcion_elegida
+            FROM votos v
+            JOIN unidades u ON v.id_unidad_representada = u.id_unidad
+            LEFT JOIN propietarios prop_orig ON u.cedula_propietario = prop_orig.cedula 
+            WHERE v.pregunta_id = ? 
+            ORDER BY u.nombre_unidad
+        """
+        # Parámetros para la consulta: asamblea_id (para asistencia), asamblea_id (para poderes), pregunta_id
+        votacion_detalle = self.execute_query(query, (asamblea_id, asamblea_id, pregunta_id), fetchall=True)
+
+        if votacion_detalle:
+            for row_data in votacion_detalle:
+                nom_u, coef, ced_prop_o, nom_prop_o, ced_ejecuta, nom_ejecuta, opcion = row_data
+
+                propietario_display = f"{nom_prop_o or 'N/A'} ({ced_prop_o or 'N/A'})"
+                ejecutor_display = f"{nom_ejecuta or 'Desconocido'} ({ced_ejecuta or 'N/A'})"
+                if not ced_ejecuta:
+                    ejecutor_display = "---"
+
+                self.lista_vt_tree.insert("", "end", values=(
+                    nom_u,
+                    f"{coef:.4f}",
+                    propietario_display,
+                    ejecutor_display,
+                    opcion
+                ))
+        else:
+            # Opcional: Mostrar mensaje si no hay datos
+            print(f"No hay datos de votación para la pregunta {pregunta_id} en la asamblea {asamblea_id}")
+            pass
     # --- Pestaña Importar Excel ---
     def setup_import_tab(self):
         frame = self.import_tab;
