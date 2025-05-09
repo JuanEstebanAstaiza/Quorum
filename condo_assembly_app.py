@@ -1,11 +1,21 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog  # filedialog para buscar archivo
 import sqlite3
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from collections import Counter, defaultdict
 import os
 import datetime
+
+# Intentar importar pandas, mostrar error si no está
+try:
+    import pandas as pd
+
+    PANDAS_AVAILABLE = True
+except ImportError:
+    PANDAS_AVAILABLE = False
+    print("ADVERTENCIA: Librería 'pandas' no encontrada. La importación desde Excel no funcionará.")
+    print("Instálala con: pip install pandas openpyxl")
 
 # --- Configuración ---
 HOST_DATA_DIR = "condominio_db_data"
@@ -21,17 +31,13 @@ ESTADO_PREGUNTA_CERRADA = 'cerrada'
 TIPO_ASISTENTE_PROPIETARIO = 'Propietario'
 TIPO_ASISTENTE_APODERADO = 'Apoderado'
 
-# Constante para límite de inasistencias (No implementada en esta versión)
-# LIMITE_INASISTENCIAS_VOTO = 3
-# -> La lógica de desactivación por inasistencia se eliminó en v6 y no se reintroduce aquí.
-
 # Constante para opción por defecto
 OPCION_NO_VOTO = "No Votó"
 
 
 # --- Funciones de Base de Datos e Inicialización ---
 def init_app_dirs_and_db():
-    """Inicializa directorios y la DB con la nueva estructura v7."""
+    """Inicializa directorios y la DB con la nueva estructura v8."""
     if not os.path.exists(HOST_DATA_DIR):
         try:
             os.makedirs(HOST_DATA_DIR)
@@ -51,7 +57,6 @@ def init_app_dirs_and_db():
     CREATE TABLE IF NOT EXISTS propietarios (
         cedula TEXT PRIMARY KEY, nombre TEXT NOT NULL, celular TEXT UNIQUE, activo INTEGER DEFAULT 1
     )''')
-    # Limpiar columnas antiguas si existen
     cols_to_drop = ['tipo_residente', 'casa', 'preguntas_consecutivas_sin_votar', 'ultima_asamblea_actividad',
                     'telegram_user_id']
     existing_cols = [col[1] for col in cursor.execute("PRAGMA table_info(propietarios)").fetchall()]
@@ -101,7 +106,6 @@ def init_app_dirs_and_db():
         opciones_configuradas TEXT, estado TEXT DEFAULT 'inactiva', 
         FOREIGN KEY (asamblea_id) REFERENCES asambleas(id) ON DELETE CASCADE
     )''')
-    # Migración de estado (si es necesario)
     try:
         cursor.execute("SELECT activa FROM preguntas LIMIT 1"); print("Migrando 'activa' a 'estado'"); cursor.execute(
             "ALTER TABLE preguntas RENAME COLUMN activa TO estado_old_int"); cursor.execute(
@@ -121,8 +125,7 @@ def init_app_dirs_and_db():
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS votos (
         id INTEGER PRIMARY KEY AUTOINCREMENT, pregunta_id INTEGER NOT NULL, id_unidad_representada INTEGER NOT NULL, 
-        cedula_ejecuta_voto TEXT, -- Ahora permite NULL para 'No Votó' inicial
-        opcion_elegida TEXT NOT NULL, 
+        cedula_ejecuta_voto TEXT, opcion_elegida TEXT NOT NULL, 
         FOREIGN KEY (pregunta_id) REFERENCES preguntas(id) ON DELETE CASCADE, 
         FOREIGN KEY (id_unidad_representada) REFERENCES unidades(id_unidad) ON DELETE CASCADE,
         UNIQUE (pregunta_id, id_unidad_representada) 
@@ -137,7 +140,7 @@ def init_app_dirs_and_db():
 class App:
     def __init__(self, root):
         self.root = root;
-        self.root.title("Gestión Asambleas Condominio v7");
+        self.root.title("Gestión Asambleas Condominio v8");
         self.root.geometry("1200x800")
         style = ttk.Style();
         style.theme_use('clam')
@@ -146,6 +149,7 @@ class App:
         self.current_question_options = [];
         self.editing_question_id = None
         self.asistencia_data = {}
+        self.excel_file_path = tk.StringVar()
 
         self.notebook = ttk.Notebook(root)
 
@@ -164,10 +168,12 @@ class App:
         self.voting_tab = ttk.Frame(self.notebook);
         self.notebook.add(self.voting_tab, text='Votación');
         self.setup_voting_tab()
-        # NUEVA Pestaña Lista Votación
         self.lista_vt_tab = ttk.Frame(self.notebook);
         self.notebook.add(self.lista_vt_tab, text='Lista Votación');
         self.setup_lista_vt_tab()
+        self.import_tab = ttk.Frame(self.notebook);
+        self.notebook.add(self.import_tab, text='Importar Excel');
+        self.setup_import_tab()
 
         self.notebook.pack(expand=True, fill='both', padx=10, pady=10)
         init_app_dirs_and_db()
@@ -191,7 +197,7 @@ class App:
             if conn: conn.close()
         return result
 
-    # --- Pestaña Propietarios (sin cambios) ---
+    # --- Pestaña Propietarios ---
     def setup_propietario_tab(self):
         frame = self.propietario_tab;
         form_frame = ttk.LabelFrame(frame, text="Registrar/Actualizar Propietario", padding=10);
@@ -247,15 +253,14 @@ class App:
                                    (nombre, celular, self.prop_cedula_to_update), commit=True);
                 messagebox.showinfo("Éxito", "Propietario actualizado.")
             else:
-                self.execute_query("INSERT INTO propietarios (cedula, nombre, celular, activo) VALUES (?, ?, ?, 1)",
-                                   (cedula, nombre, celular), commit=True);
-                messagebox.showinfo("Éxito", "Propietario registrado.")
+                self.execute_query(
+                    "INSERT OR IGNORE INTO propietarios (cedula, nombre, celular, activo) VALUES (?, ?, ?, 1)",
+                    (cedula, nombre, celular), commit=True);
+                messagebox.showinfo("Éxito", "Propietario registrado (o ya existía).")
             self.clear_propietario_fields();
             self.load_propietarios()
         except sqlite3.IntegrityError as e:
-            if "UNIQUE constraint failed: propietarios.cedula" in str(e):
-                messagebox.showerror("Duplicado", f"Cédula '{cedula}' ya existe.")
-            elif "UNIQUE constraint failed: propietarios.celular" in str(e) and celular:
+            if "UNIQUE constraint failed: propietarios.celular" in str(e) and celular:
                 messagebox.showerror("Duplicado", f"Celular '{celular}' ya existe.")
             else:
                 messagebox.showerror("Error DB", f"Error: {e}")
@@ -318,7 +323,6 @@ class App:
 
     # --- Pestaña Unidades ---
     def setup_unidad_tab(self):
-        # (Sin cambios)
         frame = self.unidad_tab;
         form_frame = ttk.LabelFrame(frame, text="Registrar/Actualizar Unidad", padding=10);
         form_frame.pack(padx=10, pady=10, fill="x")
@@ -389,9 +393,9 @@ class App:
                 messagebox.showinfo("Éxito", "Unidad actualizada.")
             else:
                 self.execute_query(
-                    "INSERT INTO unidades (nombre_unidad, coeficiente, cedula_propietario) VALUES (?, ?, ?)",
+                    "INSERT OR IGNORE INTO unidades (nombre_unidad, coeficiente, cedula_propietario) VALUES (?, ?, ?)",
                     (nombre_u, coef, ced_prop), commit=True);
-                messagebox.showinfo("Éxito", "Unidad registrada.")
+                messagebox.showinfo("Éxito", "Unidad registrada (o ya existía).")
             self.clear_unidad_fields();
             self.load_unidades()
         except sqlite3.IntegrityError:
@@ -452,7 +456,6 @@ class App:
 
     # --- Pestaña Asambleas/Poderes ---
     def setup_asamblea_tab(self):
-        # (Sin cambios UI)
         frame = self.asamblea_tab;
         assembly_selection_frame = ttk.LabelFrame(frame, text="Gestión Asamblea", padding=10);
         assembly_selection_frame.pack(padx=10, pady=10, fill="x")
@@ -537,7 +540,6 @@ class App:
         self.questions_tree.bind("<<TreeviewSelect>>", self.on_question_select)
 
     def save_question(self):
-        # (Sin cambios)
         if not self.current_assembly_id: messagebox.showerror("Error", "Seleccione asamblea."); return
         q_text = self.question_text_entry.get().strip();
         q_options = self.question_options_entry.get().strip()
@@ -569,7 +571,6 @@ class App:
                 messagebox.showerror("Error", f"No se pudo agregar: {e}")
 
     def clear_question_fields(self):
-        # (Sin cambios)
         self.editing_question_id = None;
         self.question_text_entry.config(state='normal');
         self.question_options_entry.config(state='normal')
@@ -580,7 +581,6 @@ class App:
             self.questions_tree.focus())
 
     def on_question_select(self, event=None):
-        # (Sin cambios)
         selected_item = self.questions_tree.focus()
         if not selected_item: self.clear_question_fields(); return
         values = self.questions_tree.item(selected_item, "values")
@@ -600,7 +600,6 @@ class App:
                 self.question_text_entry.config(state='normal'); self.question_options_entry.config(state='normal')
 
     def load_questions_for_assembly(self):
-        # (Sin cambios)
         if hasattr(self, 'questions_tree'):
             for i in self.questions_tree.get_children(): self.questions_tree.delete(i)
         if not self.current_assembly_id: return
@@ -613,7 +612,6 @@ class App:
                 q_id, q_text, q_opts, q_estado.capitalize()))
 
     def create_assembly(self):
-        # (Sin cambios)
         fecha = self.assembly_date_entry.get();
         descripcion = self.assembly_desc_entry.get()
         if not fecha or not descripcion: messagebox.showerror("Error", "Fecha y descripción obligatorias."); return
@@ -626,27 +624,21 @@ class App:
             messagebox.showerror("Error", f"No se pudo crear asamblea: {e}")
 
     def load_asambleas(self):
-        # (Actualizado para cargar combo de asistencia y lista votación)
         assemblies = self.execute_query("SELECT id, fecha, descripcion FROM asambleas ORDER BY fecha DESC, id DESC",
                                         fetchall=True)
         if assemblies is not None:
             assembly_list_display = [f"{row[0]}: {row[1]} - {row[2]}" for row in assemblies]
-            # Pestaña Asambleas/Poderes
             self.assembly_combobox['values'] = assembly_list_display
-            # Pestaña Asistencia
-            if hasattr(self, 'asistencia_asamblea_combo'):
-                self.asistencia_asamblea_combo['values'] = assembly_list_display
-            # Pestaña Lista Votación
-            if hasattr(self, 'lista_vt_asamblea_combo'):
-                self.lista_vt_asamblea_combo['values'] = assembly_list_display
-
+            if hasattr(self, 'asistencia_asamblea_combo'): self.asistencia_asamblea_combo[
+                'values'] = assembly_list_display
+            if hasattr(self, 'lista_vt_asamblea_combo'): self.lista_vt_asamblea_combo['values'] = assembly_list_display
             if assemblies:
                 self.assembly_combobox.current(0);
                 if hasattr(self, 'asistencia_asamblea_combo'): self.asistencia_asamblea_combo.current(0)
                 if hasattr(self, 'lista_vt_asamblea_combo'): self.lista_vt_asamblea_combo.current(0)
-                self.on_assembly_selected()  # Carga detalles para la asamblea seleccionada
-                self.load_asistencia_for_assembly()  # Carga asistencia inicial
-                self.load_questions_for_lista_vt()  # Carga preguntas para lista votación
+                self.on_assembly_selected();
+                self.load_asistencia_for_assembly();
+                self.load_questions_for_lista_vt()
             else:
                 self.assembly_combobox.set('');
                 if hasattr(self, 'asistencia_asamblea_combo'): self.asistencia_asamblea_combo.set('')
@@ -664,7 +656,6 @@ class App:
             self.clear_assembly_details()
 
     def clear_assembly_details(self):
-        # (Sin cambios)
         if hasattr(self, 'poder_unidad_combo'): self.poder_unidad_combo.set('')
         if hasattr(self, 'poder_cedula_apod_entry'): self.poder_cedula_apod_entry.delete(0, tk.END)
         if hasattr(self, 'poder_nombre_apod_entry'): self.poder_nombre_apod_entry.delete(0, tk.END)
@@ -680,7 +671,6 @@ class App:
         self.clear_voting_area()
 
     def on_assembly_selected(self, event=None):
-        # (Actualizado para sincronizar combos)
         selection = self.assembly_combobox.get()
         if selection:
             try:
@@ -688,12 +678,10 @@ class App:
                 if new_assembly_id != self.current_assembly_id:
                     self.current_assembly_id = new_assembly_id
                     self.load_selected_assembly_details()
-                    # Sincronizar otros combos de asamblea
                     if hasattr(self, 'asistencia_asamblea_combo'): self.asistencia_asamblea_combo.set(
                         selection); self.load_asistencia_for_assembly()
                     if hasattr(self, 'lista_vt_asamblea_combo'): self.lista_vt_asamblea_combo.set(
                         selection); self.load_questions_for_lista_vt()
-
             except ValueError:
                 messagebox.showerror("Error",
                                      "Selección inválida."); self.current_assembly_id = None; self.clear_assembly_details()
@@ -701,7 +689,6 @@ class App:
             self.current_assembly_id = None; self.clear_assembly_details()
 
     def load_selected_assembly_details(self):
-        # (Sin cambios)
         if not self.current_assembly_id: self.clear_assembly_details(); return
         self.update_propietario_comboboxes();
         self.update_unidad_comboboxes();
@@ -710,7 +697,6 @@ class App:
         self.load_questions_for_voting_tab()
 
     def assign_proxy(self):
-        # (Sin cambios)
         if not self.current_assembly_id: messagebox.showerror("Error", "Seleccione asamblea."); return
         unidad_selection = self.poder_unidad_combo.get();
         cedula_apoderado = self.poder_cedula_apod_entry.get().strip();
@@ -740,7 +726,6 @@ class App:
             messagebox.showerror("Error", f"No se pudo asignar: {e}")
 
     def load_proxies_for_assembly(self):
-        # (Sin cambios)
         for i in self.powers_tree.get_children(): self.powers_tree.delete(i)
         if not self.current_assembly_id: return
         query = """SELECT p.id, u.nombre_unidad, pr.nombre, p.cedula_apoderado, p.nombre_apoderado FROM poderes p JOIN unidades u ON p.id_unidad_da_poder = u.id_unidad JOIN propietarios pr ON u.cedula_propietario = pr.cedula WHERE p.asamblea_id = ? ORDER BY u.nombre_unidad"""
@@ -750,7 +735,6 @@ class App:
             id_p, nom_u, nom_prop, ced_apod, nom_apod))
 
     def delete_proxy(self):
-        # (Sin cambios)
         selected = self.powers_tree.focus();
         if not selected: messagebox.showwarning("Advertencia", "Seleccione poder."); return
         if not self.current_assembly_id: messagebox.showerror("Error", "No hay asamblea."); return
@@ -765,7 +749,6 @@ class App:
 
     # --- Pestaña Asistencia ---
     def setup_asistencia_tab(self):
-        # (Sin cambios)
         frame = self.asistencia_tab;
         asamblea_select_frame = ttk.LabelFrame(frame, text="Seleccionar Asamblea", padding=10);
         asamblea_select_frame.pack(padx=10, pady=10, fill="x")
@@ -808,21 +791,19 @@ class App:
         ttk.Button(save_button_frame, text="Guardar Cambios Asistencia", command=self.save_asistencia_changes).pack()
 
     def on_asistencia_assembly_selected(self, event=None):
-        """Sincroniza el combo principal de asambleas al cambiar en asistencia."""
         selection = self.asistencia_asamblea_combo.get()
         if selection:
             try:
                 asamblea_id = int(selection.split(":")[0])
                 if asamblea_id != self.current_assembly_id:
-                    self.assembly_combobox.set(selection)  # Actualizar el otro combo
-                    self.on_assembly_selected()  # Disparar la carga completa
+                    self.assembly_combobox.set(selection)
+                    self.on_assembly_selected()
                 else:
-                    self.load_asistencia_for_assembly()  # Solo recargar asistencia si es la misma
+                    self.load_asistencia_for_assembly()
             except (ValueError, IndexError):
                 messagebox.showerror("Error", "Selección inválida.")
 
     def load_asistencia_for_assembly(self, event=None):
-        # (Sin cambios)
         self.clear_asistencia_list();
         selection = self.asistencia_asamblea_combo.get();
         if not selection: return
@@ -870,7 +851,6 @@ class App:
                     apoderados_added.add(cedula_asist)
 
     def toggle_asistencia_on_click(self, event):
-        # (Sin cambios)
         region = self.asistencia_tree.identify_region(event.x, event.y)
         if region != "cell": return
         item_id = self.asistencia_tree.focus()
@@ -885,7 +865,6 @@ class App:
             self.asistencia_tree.item(item_id, values=tuple(current_values))
 
     def add_apoderado_to_asistencia(self):
-        # (Sin cambios)
         cedula_apod = self.asistencia_apod_cedula_entry.get().strip();
         nombre_apod = self.asistencia_apod_nombre_entry.get().strip()
         if not cedula_apod or not nombre_apod: messagebox.showerror("Error", "Ingrese Cédula y Nombre."); return
@@ -901,7 +880,6 @@ class App:
         self.asistencia_apod_nombre_entry.delete(0, tk.END)
 
     def save_asistencia_changes(self):
-        # (Sin cambios)
         selection = self.asistencia_asamblea_combo.get()
         if not selection: messagebox.showerror("Error", "Seleccione asamblea."); return
         try:
@@ -912,6 +890,7 @@ class App:
         data_to_save = [(asamblea_id, data['cedula'], data['nombre'], data['tipo'], data['presente']) for data in
                         self.asistencia_data.values()]
         conn = sqlite3.connect(DB_NAME);
+        conn.execute("PRAGMA foreign_keys = ON");
         cursor = conn.cursor()
         try:
             cursor.executemany(
@@ -927,7 +906,7 @@ class App:
 
     # --- Pestaña Votación ---
     def setup_voting_tab(self):
-        # (UI sin cambios)
+        # (Sin cambios UI)
         frame = self.voting_tab;
         question_select_frame = ttk.LabelFrame(frame, text="Seleccionar Pregunta", padding=10);
         question_select_frame.pack(padx=10, pady=10, fill="x")
@@ -1045,38 +1024,35 @@ class App:
         if q_info[0] == ESTADO_PREGUNTA_ACTIVA: messagebox.showinfo("Info", "Pregunta ya está activa."); return
 
         # 1. Obtener unidades/votantes elegibles y presentes
-        eligible_info = self._get_eligible_voters_info()
+        eligible_info = self._get_eligible_voters_info()  # Lista de dicts con id_unidad
         if not eligible_info:
             messagebox.showwarning("Sin Votantes", "No hay votantes elegibles presentes para esta asamblea.")
-            # Aún así activamos la pregunta, pero estará vacía
 
         # 2. Insertar 'No Votó' inicial para cada unidad elegible
         initial_votes_to_insert = []
         for voter_unit in eligible_info:
             initial_votes_to_insert.append((
                 new_active_question_id,
-                voter_unit['id_unidad'],
-                None,  # cedula_ejecuta_voto es NULL para 'No Votó' inicial
-                OPCION_NO_VOTO
+                voter_unit['id_unidad']
             ))
 
         conn = sqlite3.connect(DB_NAME);
+        conn.execute("PRAGMA foreign_keys = ON");
         cursor = conn.cursor()
         inserted_count = 0
         try:
-            # Usar INSERT OR IGNORE para no fallar si ya existe (aunque no debería)
+            # Usar INSERT OR IGNORE para no fallar si ya existe
             cursor.executemany(
-                f"INSERT OR IGNORE INTO votos (pregunta_id, id_unidad_representada, cedula_ejecuta_voto, opcion_elegida) VALUES (?, ?, ?, '{OPCION_NO_VOTO}')",
-                [(q_id, u_id, ced_e) for q_id, u_id, ced_e, _ in
-                 initial_votes_to_insert])  # Pasar solo los params necesarios
+                f"INSERT OR IGNORE INTO votos (pregunta_id, id_unidad_representada, cedula_ejecuta_voto, opcion_elegida) VALUES (?, ?, NULL, '{OPCION_NO_VOTO}')",
+                initial_votes_to_insert)
             inserted_count = cursor.rowcount
             conn.commit()
             print(
-                f"INFO: Insertados {inserted_count} votos iniciales como '{OPCION_NO_VOTO}' para pregunta {new_active_question_id}.")
+                f"INFO: Insertados/Ignorados {inserted_count} votos iniciales como '{OPCION_NO_VOTO}' para pregunta {new_active_question_id}.")
         except sqlite3.Error as e:
             conn.rollback()
             messagebox.showerror("Error DB", f"No se pudo inicializar 'No Votó': {e}")
-            return  # No continuar si falla la inicialización
+            return
         finally:
             conn.close()
 
@@ -1096,6 +1072,7 @@ class App:
         self.load_eligible_voters_for_voting();  # Cargar combo votantes
         self.display_vote_results_for_question(self.current_question_id);  # Mostrar estado inicial
         self.load_questions_for_assembly()
+        self.load_questions_for_lista_vt()  # Actualizar preguntas en lista votación
         messagebox.showinfo("Votación Activada",
                             f"Pregunta '{question_text}' activa. Estado inicial: '{OPCION_NO_VOTO}'.")
 
@@ -1108,7 +1085,6 @@ class App:
         question_text_closed = q_info[0] if q_info else f"ID {question_id_to_close}"
 
         # La lógica de 'No Votó' ya está implícita porque solo se sobrescriben los votos emitidos.
-        # Los que quedaron con 'No Votó' inicial, permanecerán así.
 
         # Marcar pregunta como cerrada
         self.execute_query("UPDATE preguntas SET estado = ? WHERE id = ?",
@@ -1117,6 +1093,7 @@ class App:
 
         messagebox.showinfo("Votación Cerrada", f"Se cerró votación para: '{question_text_closed}'.");
         self.display_vote_results_for_question(question_id_to_close, final=True)  # Mostrar y guardar gráfico final
+        self.load_lista_votacion_data()  # Actualizar la tabla de lista de votación
 
         # Limpiar área de votación
         self.current_question_id = None;
@@ -1156,7 +1133,7 @@ class App:
                      'id_unidad': id_u, 'nombre_unidad': nom_u, 'coeficiente': coef})
             elif id_u in unidades_con_poder:
                 ced_apod = unidades_con_poder[id_u]
-                if ced_apod in presentes_map:  # Apoderado puede ser registrado como Propietario o Apoderado en asistencia
+                if ced_apod in presentes_map:
                     apod_info = self.execute_query(
                         "SELECT nombre_asistente FROM asistencia WHERE asamblea_id = ? AND cedula_asistente = ?",
                         (self.current_assembly_id, ced_apod), fetchone=True)
@@ -1185,14 +1162,12 @@ class App:
             self.voting_resident_combobox.set('')
 
     def register_vote(self):
-        """Registra/Actualiza el voto para la unidad seleccionada."""
+        # (Sin cambios)
         if not self.current_question_id: messagebox.showerror("Error", "Ninguna pregunta activa."); return
         voter_selection_text = self.voting_resident_combobox.get();
         opcion_elegida_str = self.vote_option_var_string.get()
         if not voter_selection_text: messagebox.showerror("Error", "Seleccione votante."); return
         if not opcion_elegida_str: messagebox.showerror("Error", "Seleccione opción."); return
-
-        # Extraer cédula y unidad del texto del combo (mejorar esto en el futuro)
         try:
             cedula_ejecuta = voter_selection_text.split(":")[0].strip()
             unidad_info_str = voter_selection_text.split('(Por: ')[1].split(' / Coef:')[0]
@@ -1202,15 +1177,13 @@ class App:
             id_unidad_representada = unidad_data[0]
         except (IndexError, ValueError) as e:
             messagebox.showerror("Error", f"Error procesando votante: {e}\nTexto: {voter_selection_text}"); return
-
         try:
-            # Usar INSERT OR REPLACE para simplificar: inserta si no existe, reemplaza si existe (incluyendo el 'No Votó' inicial)
             self.execute_query(
                 "INSERT OR REPLACE INTO votos (pregunta_id, id_unidad_representada, cedula_ejecuta_voto, opcion_elegida) VALUES (?, ?, ?, ?)",
                 (self.current_question_id, id_unidad_representada, cedula_ejecuta, opcion_elegida_str), commit=True)
             messagebox.showinfo("Éxito", "Voto registrado/actualizado.")
-            self.display_vote_results_for_question(self.current_question_id);  # Actualizar gráfico
-            self.vote_option_var_string.set("")  # Limpiar selección radio
+            self.display_vote_results_for_question(self.current_question_id);
+            self.vote_option_var_string.set("")
         except Exception as e:
             messagebox.showerror("Error", f"No se pudo registrar: {e}")
 
@@ -1220,7 +1193,7 @@ class App:
         return {u[0]: u[1] for u in unidades} if unidades else {}
 
     def display_vote_results_for_question(self, question_id_for_results, final=False):
-        # (Lógica de cálculo y visualización sin cambios significativos, ya maneja No Votó por diferencia)
+        # (Sin cambios)
         if not self.current_assembly_id: messagebox.showwarning("Advertencia",
                                                                 "No hay asamblea."); self.clear_voting_area(); return
         if not question_id_for_results: self.clear_voting_area(); return
@@ -1238,7 +1211,6 @@ class App:
         q_text, q_estado, q_options_str = q_info;
         q_options_list = [opt.strip() for opt in q_options_str.split(',')] if q_options_str else ["Acepta", "No Acepta",
                                                                                                   "En Blanco"]
-
         votes_data = self.execute_query(
             "SELECT id_unidad_representada, opcion_elegida FROM votos WHERE pregunta_id = ?",
             (question_id_for_results,), fetchall=True)
@@ -1248,44 +1220,35 @@ class App:
         weighted_results = Counter();
         voted_units_count = Counter();
         total_coef_voted = 0
-
-        # Contar votos explícitos (excluyendo 'No Votó' si se insertó inicialmente)
         for id_unidad, coef in all_unit_weights.items():
             if id_unidad in votes_by_unit and votes_by_unit[id_unidad] != OPCION_NO_VOTO:
-                opcion = votes_by_unit[id_unidad]
+                opcion = votes_by_unit[id_unidad];
                 weighted_results[opcion] += coef;
                 voted_units_count[opcion] += 1;
                 total_coef_voted += coef
-            # Las unidades sin voto explícito o con 'No Votó' se contarán después
-
         coef_no_voto = total_coeficiente_condominio - total_coef_voted
-        if abs(coef_no_voto) < 0.0001: coef_no_voto = 0  # Ajuste por flotantes
-
+        if abs(coef_no_voto) < 0.0001: coef_no_voto = 0
         no_voto_label = OPCION_NO_VOTO
         if no_voto_label not in q_options_list: q_options_list.append(no_voto_label)
         weighted_results[no_voto_label] = coef_no_voto
         voted_units_count[no_voto_label] = len(all_unit_weights) - sum(
             v for k, v in voted_units_count.items() if k != no_voto_label)
-
         chart_labels = [];
-        chart_sizes = []
+        chart_sizes = [];
         options_for_chart = q_options_list
-
         for option_text_label in options_for_chart:
             coef_for_option = weighted_results[option_text_label]
             percentage = (
                                      coef_for_option / total_coeficiente_condominio) * 100 if total_coeficiente_condominio > 0 else 0
-            if coef_for_option > 0.0001:  # Solo añadir al gráfico si es significativo
-                chart_labels.append(f"{option_text_label}\n({coef_for_option:.4f} coef, {percentage:.1f}%)")
-                chart_sizes.append(coef_for_option)
-            if option_text_label not in voted_units_count: voted_units_count[option_text_label] = 0  # Asegurar conteo
-
+            if coef_for_option > 0.0001: chart_labels.append(
+                f"{option_text_label}\n({coef_for_option:.4f} coef, {percentage:.1f}%)"); chart_sizes.append(
+                coef_for_option)
+            if option_text_label not in voted_units_count: voted_units_count[option_text_label] = 0
         if not chart_sizes:
             if hasattr(self.results_display_frame,
                        'winfo_exists') and self.results_display_frame.winfo_exists(): ttk.Label(
                 self.results_display_frame, text=f"Sin votos válidos para graficar:\n'{q_text}'").pack(pady=20)
             return
-
         fig, ax = plt.subplots(figsize=(6, 4.5));
         wedges, _, autotexts = ax.pie(chart_sizes, labels=None,
                                       autopct=lambda p: '{:.1f}%'.format(p) if p > 0.1 else '', startangle=90,
@@ -1294,7 +1257,6 @@ class App:
         ax.legend(wedges, chart_labels, title="Opciones", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1),
                   fontsize='small');
         plt.subplots_adjust(left=0.05, right=0.65, top=0.9, bottom=0.05)
-
         title_text = f"Resultados: {q_text}"
         if final:
             title_text = f"Resultados Finales: {q_text}"
@@ -1303,16 +1265,14 @@ class App:
         elif q_estado == ESTADO_PREGUNTA_CERRADA:
             title_text = f"Resultados (Votación Cerrada): {q_text}"
         plt.title(title_text, pad=20, loc='center', fontsize=10)
-
-        info_text_lines = [f"Pregunta ID: {question_id_for_results}"]
-        info_text_lines.append("\nConteo (unidades):")
+        info_text_lines = [f"Pregunta ID: {question_id_for_results}"];
+        info_text_lines.append("\nConteo (unidades):");
         for opt_text in q_options_list: info_text_lines.append(f"- {opt_text}: {voted_units_count[opt_text]}")
-        info_text_lines.append(f"\nTotal Coeficiente Condominio: {total_coeficiente_condominio:.4f}")
+        info_text_lines.append(f"\nTotal Coeficiente Condominio: {total_coeficiente_condominio:.4f}");
         info_text_lines.append(f"Coeficiente Votado (excl. No Votó): {total_coef_voted:.4f}")
         if total_coeficiente_condominio > 0: participation = (
                                                                          total_coef_voted / total_coeficiente_condominio) * 100; info_text_lines.append(
             f"Participación (coeficiente): {participation:.1f}%")
-
         if hasattr(self.results_display_frame, 'winfo_exists') and self.results_display_frame.winfo_exists():
             ttk.Label(self.results_display_frame, text="\n".join(info_text_lines), justify=tk.LEFT,
                       wraplength=380).pack(pady=5, anchor='w', padx=5)
@@ -1335,125 +1295,253 @@ class App:
             self.results_canvas_widget = figure_canvas.get_tk_widget();
             self.results_canvas_widget.pack(side=tk.TOP, fill=tk.BOTH, expand=True);
             figure_canvas.draw()
-
         plt.close(fig)
 
-    # --- NUEVA Pestaña Lista Votación ---
+    # --- Pestaña Lista Votación ---
     def setup_lista_vt_tab(self):
-        frame = self.lista_vt_tab
-
-        # Selección Asamblea y Pregunta
-        filter_frame = ttk.LabelFrame(frame, text="Filtros", padding=10)
+        # (Sin cambios UI)
+        frame = self.lista_vt_tab;
+        filter_frame = ttk.LabelFrame(frame, text="Filtros", padding=10);
         filter_frame.pack(padx=10, pady=10, fill="x")
-
-        ttk.Label(filter_frame, text="Asamblea:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.lista_vt_asamblea_combo = ttk.Combobox(filter_frame, state="readonly", width=50)
-        self.lista_vt_asamblea_combo.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Label(filter_frame, text="Asamblea:").grid(row=0, column=0, padx=5, pady=5, sticky="w");
+        self.lista_vt_asamblea_combo = ttk.Combobox(filter_frame, state="readonly", width=50);
+        self.lista_vt_asamblea_combo.grid(row=0, column=1, padx=5, pady=5, sticky="ew");
         self.lista_vt_asamblea_combo.bind("<<ComboboxSelected>>", self.on_lista_vt_assembly_selected)
-
-        ttk.Label(filter_frame, text="Pregunta:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.lista_vt_pregunta_combo = ttk.Combobox(filter_frame, state="readonly", width=50)
-        self.lista_vt_pregunta_combo.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+        ttk.Label(filter_frame, text="Pregunta:").grid(row=1, column=0, padx=5, pady=5, sticky="w");
+        self.lista_vt_pregunta_combo = ttk.Combobox(filter_frame, state="readonly", width=50);
+        self.lista_vt_pregunta_combo.grid(row=1, column=1, padx=5, pady=5, sticky="ew");
         self.lista_vt_pregunta_combo.bind("<<ComboboxSelected>>", self.load_lista_votacion_data)
-
-        filter_frame.grid_columnconfigure(1, weight=1)
+        filter_frame.grid_columnconfigure(1, weight=1);
         ttk.Button(filter_frame, text="Cargar/Refrescar", command=self.load_lista_votacion_data).grid(row=1, column=2,
                                                                                                       padx=10, pady=5)
-
-        # Treeview para la lista de votos
-        list_frame = ttk.LabelFrame(frame, text="Detalle de Votación por Unidad", padding=10)
+        list_frame = ttk.LabelFrame(frame, text="Detalle Votación por Unidad", padding=10);
         list_frame.pack(padx=10, pady=10, fill="both", expand=True)
-
-        columns = ("unidad", "coef", "propietario", "ejecuta_voto", "opcion")
-        self.lista_vt_tree = ttk.Treeview(list_frame, columns=columns, show="headings")
+        columns = ("unidad", "coef", "propietario", "ejecuta_voto", "opcion");
+        self.lista_vt_tree = ttk.Treeview(list_frame, columns=columns, show="headings");
         self.lista_vt_tree.heading("unidad", text="Unidad");
-        self.lista_vt_tree.column("unidad", width=100)
+        self.lista_vt_tree.column("unidad", width=100);
         self.lista_vt_tree.heading("coef", text="Coef.");
-        self.lista_vt_tree.column("coef", width=80, anchor=tk.E)
+        self.lista_vt_tree.column("coef", width=80, anchor=tk.E);
         self.lista_vt_tree.heading("propietario", text="Propietario");
-        self.lista_vt_tree.column("propietario", width=200)
+        self.lista_vt_tree.column("propietario", width=200);
         self.lista_vt_tree.heading("ejecuta_voto", text="Votó (Cédula)");
-        self.lista_vt_tree.column("ejecuta_voto", width=120)
+        self.lista_vt_tree.column("ejecuta_voto", width=120);
         self.lista_vt_tree.heading("opcion", text="Opción Elegida");
         self.lista_vt_tree.column("opcion", width=150)
-
-        self.lista_vt_tree.pack(side=tk.LEFT, fill="both", expand=True)
+        self.lista_vt_tree.pack(side=tk.LEFT, fill="both", expand=True);
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.lista_vt_tree.yview);
         self.lista_vt_tree.configure(yscrollcommand=scrollbar.set);
         scrollbar.pack(side=tk.RIGHT, fill="y")
 
     def on_lista_vt_assembly_selected(self, event=None):
-        """Al seleccionar asamblea en Lista VT, carga sus preguntas."""
+        # (Sin cambios)
         self.load_questions_for_lista_vt()
-        # Limpiar tabla de votos al cambiar asamblea
         if hasattr(self, 'lista_vt_tree'):
             for i in self.lista_vt_tree.get_children(): self.lista_vt_tree.delete(i)
 
     def load_questions_for_lista_vt(self, event=None):
-        """Carga las preguntas de la asamblea seleccionada en el combo de Lista VT."""
-        self.lista_vt_pregunta_combo['values'] = []
+        # (Sin cambios)
+        self.lista_vt_pregunta_combo['values'] = [];
         self.lista_vt_pregunta_combo.set('')
-        if hasattr(self, 'lista_vt_tree'):  # Limpiar tabla de votos
+        if hasattr(self, 'lista_vt_tree'):
             for i in self.lista_vt_tree.get_children(): self.lista_vt_tree.delete(i)
-
         selection = self.lista_vt_asamblea_combo.get()
         if not selection: return
         try:
             asamblea_id = int(selection.split(":")[0])
         except (ValueError, IndexError):
             return
-
         questions = self.execute_query("SELECT id, texto_pregunta FROM preguntas WHERE asamblea_id = ? ORDER BY id",
                                        (asamblea_id,), fetchall=True)
         if questions:
             self.lista_vt_pregunta_combo['values'] = [f"{q[0]}: {q[1]}" for q in questions]
-            if questions: self.lista_vt_pregunta_combo.current(
-                0); self.load_lista_votacion_data()  # Cargar datos de la primera pregunta
+            if questions: self.lista_vt_pregunta_combo.current(0); self.load_lista_votacion_data()
 
     def load_lista_votacion_data(self, event=None):
-        """Carga los datos de votación detallados en el Treeview de Lista VT."""
+        # (Sin cambios)
         if hasattr(self, 'lista_vt_tree'):
             for i in self.lista_vt_tree.get_children(): self.lista_vt_tree.delete(i)
-
-        asamblea_selection = self.lista_vt_asamblea_combo.get()
+        asamblea_selection = self.lista_vt_asamblea_combo.get();
         pregunta_selection = self.lista_vt_pregunta_combo.get()
         if not asamblea_selection or not pregunta_selection: return
-
         try:
-            asamblea_id = int(asamblea_selection.split(":")[0])
-            pregunta_id = int(pregunta_selection.split(":")[0])
+            asamblea_id = int(asamblea_selection.split(":")[0]); pregunta_id = int(pregunta_selection.split(":")[0])
         except (ValueError, IndexError):
             return
-
-        # Obtener todas las unidades con sus propietarios y coeficientes
-        unidades = self.execute_query("""
-            SELECT u.id_unidad, u.nombre_unidad, u.coeficiente, p.nombre 
-            FROM unidades u LEFT JOIN propietarios p ON u.cedula_propietario = p.cedula 
-            ORDER BY u.nombre_unidad
-        """, fetchall=True)
+        unidades = self.execute_query(
+            """SELECT u.id_unidad, u.nombre_unidad, u.coeficiente, p.nombre FROM unidades u LEFT JOIN propietarios p ON u.cedula_propietario = p.cedula ORDER BY u.nombre_unidad""",
+            fetchall=True)
         if not unidades: return
-
-        # Obtener los votos registrados para esta pregunta
-        votos = self.execute_query("""
-            SELECT id_unidad_representada, cedula_ejecuta_voto, opcion_elegida 
-            FROM votos 
-            WHERE pregunta_id = ?
-        """, (pregunta_id,), fetchall=True)
+        votos = self.execute_query(
+            """SELECT id_unidad_representada, cedula_ejecuta_voto, opcion_elegida FROM votos WHERE pregunta_id = ?""",
+            (pregunta_id,), fetchall=True)
         votos_map = {v[0]: {'cedula': v[1], 'opcion': v[2]} for v in votos} if votos else {}
-
-        # Poblar el treeview
         for id_u, nom_u, coef, nom_prop in unidades:
             voto_info = votos_map.get(id_u)
-            cedula_voto = voto_info['cedula'] if voto_info else "---"
-            opcion_voto = voto_info['opcion'] if voto_info else OPCION_NO_VOTO  # Mostrar 'No Votó' si no hay registro
+            cedula_voto = voto_info['cedula'] if voto_info and voto_info['opcion'] != OPCION_NO_VOTO else "---"
+            opcion_voto = voto_info['opcion'] if voto_info else OPCION_NO_VOTO
+            self.lista_vt_tree.insert("", "end",
+                                      values=(nom_u, f"{coef:.4f}", nom_prop or "N/A", cedula_voto, opcion_voto))
 
-            self.lista_vt_tree.insert("", "end", values=(
-                nom_u,
-                f"{coef:.4f}",
-                nom_prop or "N/A",
-                cedula_voto,
-                opcion_voto
-            ))
+    # --- Pestaña Importar Excel ---
+    def setup_import_tab(self):
+        # (Sin cambios)
+        frame = self.import_tab;
+        file_frame = ttk.LabelFrame(frame, text="Seleccionar Archivo Excel", padding=10);
+        file_frame.pack(padx=10, pady=10, fill="x")
+        ttk.Button(file_frame, text="Buscar Archivo (.xlsx, .xls)", command=self.browse_excel_file).pack(side=tk.LEFT,
+                                                                                                         padx=5)
+        self.excel_path_label = ttk.Label(file_frame, textvariable=self.excel_file_path, wraplength=400);
+        self.excel_path_label.pack(side=tk.LEFT, padx=5, fill="x", expand=True);
+        self.excel_file_path.set("Ningún archivo seleccionado")
+        mapping_frame = ttk.LabelFrame(frame, text="Mapeo de Columnas Excel", padding=10);
+        mapping_frame.pack(padx=10, pady=10, fill="x")
+        self.col_cedula_var = tk.StringVar(value="CEDULA");
+        self.col_nombre_prop_var = tk.StringVar(value="NOMBRE_PROPIETARIO");
+        self.col_celular_var = tk.StringVar(value="CELULAR");
+        self.col_unidad_var = tk.StringVar(value="UNIDAD");
+        self.col_coeficiente_var = tk.StringVar(value="COEFICIENTE");
+        self.sheet_name_var = tk.StringVar(value="")
+        ttk.Label(mapping_frame, text="Nombre Hoja (opcional):").grid(row=0, column=0, padx=5, pady=3, sticky="w");
+        ttk.Entry(mapping_frame, textvariable=self.sheet_name_var, width=30).grid(row=0, column=1, padx=5, pady=3,
+                                                                                  sticky="ew")
+        ttk.Label(mapping_frame, text="Columna Cédula Prop.:").grid(row=1, column=0, padx=5, pady=3, sticky="w");
+        ttk.Entry(mapping_frame, textvariable=self.col_cedula_var, width=30).grid(row=1, column=1, padx=5, pady=3,
+                                                                                  sticky="ew")
+        ttk.Label(mapping_frame, text="Columna Nombre Prop.:").grid(row=2, column=0, padx=5, pady=3, sticky="w");
+        ttk.Entry(mapping_frame, textvariable=self.col_nombre_prop_var, width=30).grid(row=2, column=1, padx=5, pady=3,
+                                                                                       sticky="ew")
+        ttk.Label(mapping_frame, text="Columna Celular Prop. (opc):").grid(row=3, column=0, padx=5, pady=3, sticky="w");
+        ttk.Entry(mapping_frame, textvariable=self.col_celular_var, width=30).grid(row=3, column=1, padx=5, pady=3,
+                                                                                   sticky="ew")
+        ttk.Label(mapping_frame, text="Columna Nombre Unidad:").grid(row=4, column=0, padx=5, pady=3, sticky="w");
+        ttk.Entry(mapping_frame, textvariable=self.col_unidad_var, width=30).grid(row=4, column=1, padx=5, pady=3,
+                                                                                  sticky="ew")
+        ttk.Label(mapping_frame, text="Columna Coeficiente:").grid(row=5, column=0, padx=5, pady=3, sticky="w");
+        ttk.Entry(mapping_frame, textvariable=self.col_coeficiente_var, width=30).grid(row=5, column=1, padx=5, pady=3,
+                                                                                       sticky="ew")
+        mapping_frame.grid_columnconfigure(1, weight=1)
+        action_frame = ttk.Frame(frame);
+        action_frame.pack(padx=10, pady=10, fill="x");
+        ttk.Button(action_frame, text="Importar Datos", command=self.import_data_from_excel).pack(pady=10)
+        log_frame = ttk.LabelFrame(frame, text="Resultado Importación", padding=10);
+        log_frame.pack(padx=10, pady=10, fill="both", expand=True)
+        self.import_log_text = tk.Text(log_frame, height=10, wrap="word", state="disabled");
+        log_scroll = ttk.Scrollbar(log_frame, command=self.import_log_text.yview);
+        self.import_log_text.config(yscrollcommand=log_scroll.set);
+        self.import_log_text.pack(side=tk.LEFT, fill="both", expand=True);
+        log_scroll.pack(side=tk.RIGHT, fill="y")
+
+    def browse_excel_file(self):
+        # (Sin cambios)
+        filetypes = (("Archivos Excel", "*.xlsx *.xls"), ("Todos", "*.*"));
+        filepath = filedialog.askopenfilename(title="Seleccionar Excel", filetypes=filetypes)
+        if filepath:
+            self.excel_file_path.set(filepath); self.log_import_message(f"Archivo: {filepath}")
+        else:
+            self.excel_file_path.set("Ningún archivo")
+
+    def log_import_message(self, message):
+        # (Sin cambios)
+        self.import_log_text.config(state="normal");
+        self.import_log_text.insert(tk.END, message + "\n");
+        self.import_log_text.config(state="disabled");
+        self.import_log_text.see(tk.END)
+
+    def import_data_from_excel(self):
+        # (Corrección if/else multilínea)
+        if not PANDAS_AVAILABLE: messagebox.showerror("Error Librería",
+                                                      "Instala 'pandas' y 'openpyxl'.\nEjecuta: pip install pandas openpyxl"); return
+        filepath = self.excel_file_path.get();
+        if not filepath or filepath == "Ningún archivo seleccionado": messagebox.showerror("Error",
+                                                                                           "Selecciona archivo Excel."); return
+        sheet = self.sheet_name_var.get().strip() or None;
+        col_cedula = self.col_cedula_var.get().strip();
+        col_nombre_prop = self.col_nombre_prop_var.get().strip();
+        col_celular = self.col_celular_var.get().strip();
+        col_unidad = self.col_unidad_var.get().strip();
+        col_coef = self.col_coeficiente_var.get().strip()
+        if not col_cedula or not col_nombre_prop or not col_unidad or not col_coef: messagebox.showerror("Error Mapeo",
+                                                                                                         "Columnas Cédula, Nombre Prop., Unidad y Coeficiente obligatorias."); return
+        self.log_import_message(f"--- Iniciando importación desde {os.path.basename(filepath)} ---")
+        try:
+            df = pd.read_excel(filepath, sheet_name=sheet, dtype=str);
+            df = df.fillna('')
+            self.log_import_message(f"Archivo leído. {len(df)} filas.");
+            required_cols = {col_cedula, col_nombre_prop, col_unidad, col_coef};
+            if col_celular: required_cols.add(col_celular)
+            missing_cols = required_cols - set(df.columns)
+            if missing_cols: messagebox.showerror("Error Columnas",
+                                                  f"Columnas no encontradas: {', '.join(missing_cols)}"); self.log_import_message(
+                f"ERROR: Columnas faltantes: {', '.join(missing_cols)}"); return
+            conn = sqlite3.connect(DB_NAME);
+            cursor = conn.cursor();
+            props_added = 0;
+            props_skipped = 0;
+            unidades_added = 0;
+            unidades_skipped = 0;
+            errors = 0
+            for index, row in df.iterrows():
+                cedula = str(row[col_cedula]).strip();
+                nombre = str(row[col_nombre_prop]).strip();
+                celular = str(row[col_celular]).strip() if col_celular else "";
+                unidad = str(row[col_unidad]).strip();
+                coef_str = str(row[col_coef]).strip().replace(',', '.')
+                if not cedula or not nombre or not unidad or not coef_str: self.log_import_message(
+                    f"FILA {index + 2} OMITIDA: Faltan datos."); errors += 1; continue
+                try:
+                    coef = float(coef_str)
+                except ValueError:
+                    self.log_import_message(
+                        f"FILA {index + 2} OMITIDA: Coef '{coef_str}' inválido (Unidad '{unidad}')."); errors += 1; continue
+
+                # Intentar insertar propietario
+                try:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO propietarios (cedula, nombre, celular, activo) VALUES (?, ?, ?, 1)",
+                        (cedula, nombre, celular if celular else None))
+                    # Corregido: if/else multilínea
+                    if cursor.rowcount > 0:
+                        props_added += 1
+                    else:
+                        props_skipped += 1
+                except sqlite3.IntegrityError as e:
+                    self.log_import_message(f"FILA {index + 2} ERROR PROP: {e} (Céd: {cedula}, Cel: {celular})");
+                    errors += 1;
+                    continue
+
+                    # Intentar insertar unidad
+                try:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO unidades (nombre_unidad, coeficiente, cedula_propietario) VALUES (?, ?, ?)",
+                        (unidad, coef, cedula))
+                    # Corregido: if/else multilínea
+                    if cursor.rowcount > 0:
+                        unidades_added += 1
+                    else:
+                        unidades_skipped += 1
+                except sqlite3.Error as e:
+                    self.log_import_message(
+                        f"FILA {index + 2} ERROR UNIDAD: {e} (Unidad: {unidad}, Céd Prop: {cedula})");
+                    errors += 1;
+
+            conn.commit();
+            conn.close()
+            summary = f"--- Fin Importación ---\nProp. Nuevos: {props_added}\nProp. Omitidos: {props_skipped}\nUnidades Nuevas: {unidades_added}\nUnidades Omitidas: {unidades_skipped}\nErrores/Omitidos: {errors}"
+            self.log_import_message(summary);
+            messagebox.showinfo("Importación Completa", summary);
+            self.load_propietarios();
+            self.load_unidades()
+        except FileNotFoundError:
+            messagebox.showerror("Error Archivo", f"No se encontró: {filepath}"); self.log_import_message(
+                f"ERROR: Archivo no encontrado: {filepath}")
+        except ImportError:
+            messagebox.showerror("Error Librería",
+                                 "Instala 'pandas' y 'openpyxl'.\nEjecuta: pip install pandas openpyxl"); self.log_import_message(
+                "ERROR: Falta pandas u openpyxl.")
+        except Exception as e:
+            messagebox.showerror("Error Importación", f"Error inesperado: {e}"); self.log_import_message(
+                f"ERROR INESPERADO: {e}")
 
 
 # --- Main ---
